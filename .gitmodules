@@ -7,3 +7,9 @@
 [submodule "lib/hookmate"]
 	path = lib/hookmate
 	url = https://github.com/akshatmittal/hookmate
+[submodule "lib/conditional-tokens-contracts"]
+	path = lib/conditional-tokens-contracts
+	url = https://github.com/gnosis/conditional-tokens-contracts
+[submodule "lib/1155-to-20"]
+	path = lib/1155-to-20
+	url = https://github.com/gnosis/1155-to-20
