@@ -5,10 +5,7 @@ import {BaseHook} from "@openzeppelin/uniswap-hooks/src/base/BaseHook.sol";
 import {CurrencySettler} from "@openzeppelin/uniswap-hooks/src/utils/CurrencySettler.sol";
 
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
-import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {SafeCast} from "@uniswap/v4-core/src/libraries/SafeCast.sol";
-import {FixedPoint96} from "@uniswap/v4-core/src/libraries/FixedPoint96.sol";
-import {SqrtPriceMath} from "@uniswap/v4-core/src/libraries/SqrtPriceMath.sol";
 import {IPoolManager, SwapParams, ModifyLiquidityParams} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {IUnlockCallback} from "@uniswap/v4-core/src/interfaces/callback/IUnlockCallback.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
@@ -77,10 +74,8 @@ contract CompleteSetInternalizationHook is BaseHook, ERC1155Holder, IUnlockCallb
     using PoolIdLibrary for PoolKey;
     using CurrencyLibrary for Currency;
     using CurrencySettler for Currency;
-    using StateLibrary for IPoolManager;
     using SafeCast for uint256;
     using SafeERC20 for IERC20;
-    using CompleteSetLib for IERC20;
 
     IConditionalTokens public immutable conditionalTokens;
     IWrapped1155Factory public immutable wrapped1155Factory;
@@ -128,54 +123,18 @@ contract CompleteSetInternalizationHook is BaseHook, ERC1155Holder, IUnlockCallb
         string calldata noName,
         string calldata noSymbol
     ) external {
-        PoolId poolId = key.toId();
-        Market storage market = _markets[poolId];
-        if (market.registered) revert MarketAlreadyRegistered(poolId);
-        _requirePreparedUnresolvedBinaryCondition(conditionId);
-
-        market.collateralToken = collateralToken;
-        market.conditionId = conditionId;
-        market.yesPositionId = collateralToken.yesPositionId(conditionId);
-        market.noPositionId = collateralToken.noPositionId(conditionId);
-        market.yesWrapData = CompleteSetLib.encodeWrappedTokenData(yesName, yesSymbol, 18);
-        market.noWrapData = CompleteSetLib.encodeWrappedTokenData(noName, noSymbol, 18);
-
-        market.yesCurrency = Currency.wrap(
-            wrapped1155Factory.requireWrapped1155(conditionalTokens, market.yesPositionId, market.yesWrapData)
+        CompleteSetLib.registerMarket(
+            conditionalTokens,
+            wrapped1155Factory,
+            key,
+            collateralToken,
+            conditionId,
+            yesName,
+            yesSymbol,
+            noName,
+            noSymbol,
+            _markets[key.toId()]
         );
-        market.noCurrency = Currency.wrap(
-            wrapped1155Factory.requireWrapped1155(conditionalTokens, market.noPositionId, market.noWrapData)
-        );
-        _requireMatchesPoolCurrencies(key, market.yesCurrency, market.noCurrency);
-        market.registered = true;
-
-        // One-time max approval so `splitPosition` can pull collateral from this contract.
-        // NOTE: not compatible with tokens that require resetting the allowance to zero before it can
-        // be changed again (e.g. legacy USDT) — acceptable for the MVP, flagged for production hardening.
-        collateralToken.forceApprove(address(conditionalTokens), type(uint256).max);
-
-        emit MarketRegistered(
-            poolId, conditionId, address(collateralToken), Currency.unwrap(market.yesCurrency), Currency.unwrap(market.noCurrency)
-        );
-    }
-
-    function _requirePreparedUnresolvedBinaryCondition(bytes32 conditionId) private view {
-        uint256 outcomeSlotCount = conditionalTokens.getOutcomeSlotCount(conditionId);
-        if (outcomeSlotCount != CompleteSetLib.BINARY_OUTCOME_SLOT_COUNT) {
-            revert ConditionNotBinary(conditionId, outcomeSlotCount);
-        }
-        if (conditionalTokens.payoutDenominator(conditionId) != 0) revert ConditionAlreadyResolved(conditionId);
-    }
-
-    function _requireMatchesPoolCurrencies(PoolKey calldata key, Currency yesCurrency, Currency noCurrency)
-        private
-        pure
-    {
-        bool matchesForward = key.currency0 == yesCurrency && key.currency1 == noCurrency;
-        bool matchesReverse = key.currency0 == noCurrency && key.currency1 == yesCurrency;
-        if (!matchesForward && !matchesReverse) {
-            revert CurrencyMismatch(yesCurrency, key.currency0);
-        }
     }
 
     // ---------------------------------------------------------------------
@@ -239,7 +198,7 @@ contract CompleteSetInternalizationHook is BaseHook, ERC1155Holder, IUnlockCallb
         uint256 amount = exactInput ? uint256(-params.amountSpecified) : uint256(params.amountSpecified);
         if (amount == 0) return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
 
-        if (!_priceIsAtOrPastParity(poolId, params.zeroForOne, amount, exactInput)) {
+        if (!CompleteSetLib.priceIsAtOrPastParity(poolManager, poolId, params.zeroForOne, amount, exactInput)) {
             return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
         }
         if (market.collateralReserve < amount) {
@@ -264,33 +223,6 @@ contract CompleteSetInternalizationHook is BaseHook, ERC1155Holder, IUnlockCallb
             ? toBeforeSwapDelta(amount.toInt128(), -amount.toInt128())
             : toBeforeSwapDelta(-amount.toInt128(), amount.toInt128());
         return (BaseHook.beforeSwap.selector, returnDelta, 0);
-    }
-
-    /// @dev Backstop heuristic: routes the full trade through CTF once either (a) the pool's *current*
-    /// spot price is already at or past 1:1 parity in the trade's direction, or (b) this trade's own
-    /// size, projected against the pool's currently active tick liquidity, would walk the price at or
-    /// past parity. (b) is a same-active-tick approximation (it does not simulate crossing into the next
-    /// initialized tick) — deliberately simple, and strictly more conservative than (a) alone, since it
-    /// only ever routes *more* trades to the safe CTF backstop, never fewer.
-    function _priceIsAtOrPastParity(PoolId poolId, bool zeroForOne, uint256 amount, bool exactInput)
-        internal
-        view
-        returns (bool)
-    {
-        (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(poolId);
-        uint160 parity = uint160(FixedPoint96.Q96);
-        // zeroForOne pushes sqrtPriceX96 down (worse for a trader paying currency0); oneForZero pushes
-        // it up (worse for a trader paying currency1). Route through CTF once the pool is already on
-        // the trader-unfavorable side of parity for this direction.
-        if (zeroForOne ? sqrtPriceX96 <= parity : sqrtPriceX96 >= parity) return true;
-
-        uint128 liquidity = poolManager.getLiquidity(poolId);
-        if (liquidity == 0) return false;
-
-        uint160 projected = exactInput
-            ? SqrtPriceMath.getNextSqrtPriceFromInput(sqrtPriceX96, liquidity, amount, zeroForOne)
-            : SqrtPriceMath.getNextSqrtPriceFromOutput(sqrtPriceX96, liquidity, amount, zeroForOne);
-        return zeroForOne ? projected <= parity : projected >= parity;
     }
 
     // ---------------------------------------------------------------------
@@ -392,7 +324,7 @@ contract CompleteSetInternalizationHook is BaseHook, ERC1155Holder, IUnlockCallb
         }
         emit OpportunisticSwap(poolId, sellYes, amountIn, amountOut);
 
-        (uint256 amountMerged, uint256 surplus) = _mergeIfPossible(poolId, market);
+        (uint256 amountMerged, uint256 surplus) = CompleteSetLib.mergeIfPossible(conditionalTokens, poolId, market);
         return abi.encode(amountMerged, surplus);
     }
 
@@ -403,33 +335,7 @@ contract CompleteSetInternalizationHook is BaseHook, ERC1155Holder, IUnlockCallb
         if (market.yesClaimBalance > 0 || market.noClaimBalance > 0) {
             poolManager.unlock(abi.encode(UnlockAction.Sweep, abi.encode(poolId)));
         }
-        return _mergeIfPossible(poolId, market);
-    }
-
-    function _mergeIfPossible(PoolId poolId, Market storage market)
-        private
-        returns (uint256 amountMerged, uint256 surplus)
-    {
-        amountMerged = market.yesInventory < market.noInventory ? market.yesInventory : market.noInventory;
-        if (amountMerged == 0) return (0, 0);
-
-        uint256 balanceBefore = market.collateralToken.balanceOf(address(this));
-        conditionalTokens.mergePositions(
-            market.collateralToken, bytes32(0), market.conditionId, CompleteSetLib.binaryPartition(), amountMerged
-        );
-        uint256 proceeds = market.collateralToken.balanceOf(address(this)) - balanceBefore;
-
-        market.yesInventory -= amountMerged;
-        market.noInventory -= amountMerged;
-
-        uint256 recoveredCost = amountMerged < market.outstandingSplitCost ? amountMerged : market.outstandingSplitCost;
-        market.outstandingSplitCost -= recoveredCost;
-        surplus = proceeds - recoveredCost;
-
-        market.collateralReserve += proceeds;
-        if (surplus > 0) market.lifetimeSurplus += surplus;
-
-        emit InventoryMerged(poolId, amountMerged, surplus);
+        return CompleteSetLib.mergeIfPossible(conditionalTokens, poolId, market);
     }
 
     // ---------------------------------------------------------------------

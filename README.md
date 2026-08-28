@@ -1,183 +1,175 @@
-# Uniswap v4 Hook Template
+# Complete-Set Internalization Hook
 
-**A template for writing Uniswap v4 Hooks 🦄**
+**A Uniswap v4 hook that turns the Gnosis Conditional Tokens Framework (CTF) complete-set
+invariant — `1 YES + 1 NO = exactly 1 unit of collateral` — into a native liquidity source
+and a hard price-impact backstop for binary-outcome (YES/NO) pools.**
 
-### Get Started
+Built for the Atrium UHI10 Hookathon, Sustainable Liquidity & MEV Protection track.
 
-This template provides a starting point for writing Uniswap v4 Hooks, including a simple example and preconfigured test environment. Start by creating a new repository using the "Use this template" button at the top right of this page. Alternatively you can also click this link:
+## The idea
 
-[![Use this Template](https://img.shields.io/badge/Use%20this%20Template-101010?style=for-the-badge&logo=github)](https://github.com/uniswapfoundation/v4-template/generate)
+A pool trading a prediction market's YES token against its NO token has no inherent reason
+to stay near 1:1 parity — nothing but the AMM curve's own liquidity resists one side being
+bid up arbitrarily. This hook fixes that structurally: whenever a swap's price is already at,
+past, or projected to cross 1:1 parity, the hook fills the trade itself via a fresh CTF
+split — funded from its own collateral reserve — at exactly 1:1, instead of letting the AMM
+curve execute at a worse price. It returns a pure `BeforeSwapDelta` NoOp, so the
+`PoolManager`'s own curve is untouched for that trade.
 
-1. The example hook [Counter.sol](src/Counter.sol) demonstrates the `beforeSwap()` and `afterSwap()` hooks
-2. The test template [Counter.t.sol](test/Counter.t.sol) preconfigures the v4 pool manager, test tokens, and test liquidity.
+This structurally bounds price impact the same way a $1 collateral redemption right always
+does for a single outcome token, and because every collateral unit spent on a split is
+recovered by the matching merge, the mechanism is capital-neutral to the hook by
+construction — it protects traders without costing LPs anything on its own.
 
-<details>
-<summary>Updating to v4-template:latest</summary>
+On top of that defensive backstop, the hook also opportunistically harvests real surplus for
+LPs: whenever the hook's own YES/NO inventory becomes imbalanced (asymmetric trade flow),
+it can sell the idle, unmatched excess directly against the pool's own AMM curve for the
+deficient leg and merge the result — with a hard, contract-enforced floor that the trade can
+never come back worse than what was sold, so this can never reduce LP capital.
 
-This template is actively maintained -- you can update the v4 dependencies, scripts, and helpers:
+## Architecture
+
+```
+src/
+  CompleteSetInternalizationHook.sol   the hook: BaseHook + beforeSwap routing + LP reserve
+  interfaces/
+    ICompleteSetInternalizationHook.sol  external API, events, errors, Market struct
+    IConditionalTokens.sol               minimal 0.8.x-compatible CTF interface
+    IWrapped1155Factory.sol              minimal 0.8.x-compatible Wrapped1155Factory interface
+  libraries/
+    CompleteSetLib.sol                   CTF ID math (ported from CTHelpers.sol) + fill/sweep/
+                                          harvest helpers shared by the hook
+test/
+  CompleteSetInternalizationHook.t.sol   end-to-end hook tests
+  CompleteSetLib.t.sol                   pure-math sanity tests
+  mocks/                                 0.8.26-native re-implementations of CTF/Wrapped1155Factory
+```
+
+The real `ConditionalTokens` (`lib/conditional-tokens-contracts`, pragma `^0.5.1`) and
+`Wrapped1155Factory` (`lib/1155-to-20`, pragma `>=0.6.0`) can't be imported directly into this
+`^0.8.26` project, so the hook talks to them through minimal ABI-compatible interfaces, and
+the test suite exercises those interfaces against 0.8.26-native mocks that reproduce the real
+contracts' split/merge/redeem/wrap economics (see each mock's NatSpec for exactly what is and
+isn't verified this way).
+
+### Mechanism, in one pass through `_beforeSwap`
+
+1. Reject if the market isn't registered or is frozen for resolution.
+2. Compute the swap amount (works for both exact-input and exact-output).
+3. Check whether the pool's current price is already at/past 1:1 parity in the trade's
+   direction, **or** whether this trade's own size — projected against the pool's active-tick
+   liquidity — would walk it there. If neither, let the AMM curve handle it.
+4. If the hook's collateral reserve can't cover the fill, fall back to the AMM curve.
+5. Otherwise: split the reserve into a fresh complete set, hand the trader their leg, hold the
+   other, and return a `BeforeSwapDelta` that fully absorbs the swap — a pure NoOp for the
+   `PoolManager`'s own curve.
+
+### Key invariants (see `CLAUDE.md` for the full list)
+
+1. `yesInventory + noInventory` (in complete sets) can always be merged 1:1 back to collateral.
+2. When the CTF path is taken, the `PoolManager`'s own delta for that swap is exactly zero.
+3. No user or LP funds can be stuck or silently lost.
+4. Surplus only ever comes from a real `mergePositions` call whose proceeds exceed the
+   tracked acquisition cost of what was merged — never credited out of thin air.
+
+## Current scope
+
+**Implemented**
+- Buy-path MVP: market registration, LP collateral reserve with share-based NAV
+- CTF-backstop fill for both exact-input and exact-output swaps
+- Trade-impact-aware parity check (projects the trade's own price impact, not just spot price)
+- Claim sweeping and automatic complete-set merging
+- Opportunistic surplus harvesting against the pool's own AMM curve, with a hard no-lose floor
+- Freeze-for-resolution and post-resolution redemption
+
+**Out of scope for this MVP** (see `CLAUDE.md`): full sell-path optimization beyond what's
+covered above, multi-outcome markets, advanced post-resolution auctions, intent-based/
+cross-chain routing, complex fee tiers or dynamic fees.
+
+**Known gaps / next steps**
+- No live testnet deployment yet.
+- **Wrapped1155Factory on Gnosis Chain is an older, incompatible ABI.** The fork test below found
+  that the live deployment at `0xEC9Cc78463b72D7246E8189Df5EeD5fDc3508E71` only exposes
+  `requireWrapped1155(address,uint256)` (2 args, no per-token custom naming) — not the
+  3-argument `(address, uint256, bytes data)` version this project's `IWrapped1155Factory` and
+  every wrap call in the hook assume (confirmed by extracting the deployed dispatcher's PUSH4
+  selectors and matching them via `cast 4byte`, since the deployed contract predates Gnosis's
+  `1155-to-20` `master` branch adding per-token naming). Before pointing this hook at Gnosis
+  Chain for real, this needs one of: locating a newer Wrapped1155Factory deployment elsewhere
+  with the 3-argument ABI, deploying a fresh instance of the current version, or adapting
+  `IWrapped1155Factory` to this deployment's 2-argument ABI. The real `ConditionalTokens` at
+  `0xCeAfDD6bc0bEF976fdCd1112955828E00543c0Ce` has no such issue — every function this project
+  calls on it matches exactly (see the fork test).
+
+## Development
 
 ```bash
-git remote add template https://github.com/uniswapfoundation/v4-template
-git fetch template
-git merge template/main <BRANCH> --allow-unrelated-histories
-```
-
-</details>
-
-### Requirements
-
-This template is designed to work with Foundry (stable). If you are using Foundry Nightly, you may encounter compatibility issues. You can update your Foundry installation to the latest stable version by running:
-
-```
-foundryup
-```
-
-To set up the project, run the following commands in your terminal to install dependencies and run the tests:
-
-```
 forge install
+forge build
 forge test
 ```
 
-### Local Development
+Note: `foundry.toml` sets `via_ir = true`. The hook and `CompleteSetLib` sit close enough to the
+EIP-170 24KB deployed-code limit (`forge build --sizes` shows the current margin) that this isn't
+optional — building with the legacy pipeline both fails to compile (stack-too-deep in several
+functions) and produces oversized bytecode that would revert on deployment to a real network.
 
-Other than writing unit tests (recommended!), you can only deploy & test hooks on [anvil](https://book.getfoundry.sh/anvil/) locally. Scripts are available in the `script/` directory, which can be used to deploy hooks, create pools, provide liquidity and swap tokens. The scripts support both local `anvil` environment as well as running them directly on a production network.
+Run just this hook's tests:
 
-### Executing locally with using **Anvil**:
+```bash
+forge test --match-contract "CompleteSet"
+```
 
-1. Start Anvil (or fork a specific chain using anvil):
+### Fork test against the real Gnosis Chain CTF
+
+`test/fork/CompleteSetInternalizationHookFork.t.sol` runs `CompleteSetLib`'s ported CTF ID math
+and the full split → merge → redeem lifecycle against the *real*, live `ConditionalTokens`
+deployment on Gnosis Chain (not the mocks the rest of the suite uses) — the same contract Omen's
+prediction markets run on production TVL. It requires network access and is included in a plain
+`forge test` run; exclude it from an offline run with:
+
+```bash
+forge test --no-match-path "test/fork/**"
+```
+
+or run it on its own:
+
+```bash
+forge test --match-contract "CompleteSetInternalizationHookForkTest"
+```
+
+### Deploying
+
+`script/00_DeployCompleteSetInternalizationHook.s.sol` mines a CREATE2 salt for the hook's
+permission flags, deploys it, deploys a demo binary market (backed by the same mock CTF /
+Wrapped1155Factory the test suite uses), registers it against a new pool, and seeds an LP
+reserve — a self-contained, runnable demo.
+
+Local (Anvil):
 
 ```bash
 anvil
-```
-
-or
-
-```bash
-anvil --fork-url <YOUR_RPC_URL>
-```
-
-2. Execute scripts:
-
-```bash
-forge script script/00_DeployHook.s.sol \
+forge script script/00_DeployCompleteSetInternalizationHook.s.sol \
     --rpc-url http://localhost:8545 \
     --private-key <PRIVATE_KEY> \
     --broadcast
 ```
 
-### Using **RPC URLs** (actual transactions):
-
-:::info
-It is best to not store your private key even in .env or enter it directly in the command line. Instead use the `--account` flag to select your private key from your keystore.
-:::
-
-### Follow these steps if you have not stored your private key in the keystore:
-
-<details>
-
-1. Add your private key to the keystore:
+Against a live network, use a keystore account rather than a raw private key:
 
 ```bash
-cast wallet import <SET_A_NAME_FOR_KEY> --interactive
-```
+cast wallet import <KEY_NAME> --interactive
 
-2. You will prompted to enter your private key and set a password, fill and press enter:
-
-```
-Enter private key: <YOUR_PRIVATE_KEY>
-Enter keystore password: <SET_NEW_PASSWORD>
-```
-
-You should see this:
-
-```
-`<YOUR_WALLET_PRIVATE_KEY_NAME>` keystore was saved successfully. Address: <YOUR_WALLET_ADDRESS>
-```
-
-::: warning
-Use `history -c` to clear your command history.
-:::
-
-</details>
-
-1. Execute scripts:
-
-```bash
-forge script script/00_DeployHook.s.sol \
+forge script script/00_DeployCompleteSetInternalizationHook.s.sol \
     --rpc-url <YOUR_RPC_URL> \
-    --account <YOUR_WALLET_PRIVATE_KEY_NAME> \
+    --account <KEY_NAME> \
     --sender <YOUR_WALLET_ADDRESS> \
     --broadcast
 ```
 
-You will prompted to enter your wallet password, fill and press enter:
-
-```
-Enter keystore password: <YOUR_PASSWORD>
-```
-
-### Key Modifications to note:
-
-1. Update the `token0` and `token1` addresses in the `BaseScript.sol` file to match the tokens you want to use in the network of your choice for sepolia and mainnet deployments.
-2. Update the `token0Amount` and `token1Amount` in the `CreatePoolAndAddLiquidity.s.sol` file to match the amount of tokens you want to provide liquidity with.
-3. Update the `token0Amount` and `token1Amount` in the `AddLiquidity.s.sol` file to match the amount of tokens you want to provide liquidity with.
-4. Update the `amountIn` and `amountOutMin` in the `Swap.s.sol` file to match the amount of tokens you want to swap.
-
-### Verifying the hook contract
-
-```bash
-forge verify-contract \
-  --rpc-url <URL> \
-  --chain <CHAIN_NAME_OR_ID> \
-  # Generally etherscan
-  --verifier <Verification_Provider> \
-  # Use --etherscan-api-key <ETHERSCAN_API_KEY> if you are using etherscan
-  --verifier-api-key <Verification_Provider_API_KEY> \
-  --constructor-args <ABI_ENCODED_ARGS> \
-  --num-of-optimizations <OPTIMIZER_RUNS> \
-  <Contract_Address> \
-  <path/to/Contract.sol:ContractName>
-  --watch
-```
-
-### Troubleshooting
-
-<details>
-
-#### Permission Denied
-
-When installing dependencies with `forge install`, Github may throw a `Permission Denied` error
-
-Typically caused by missing Github SSH keys, and can be resolved by following the steps [here](https://docs.github.com/en/github/authenticating-to-github/connecting-to-github-with-ssh)
-
-Or [adding the keys to your ssh-agent](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/generating-a-new-ssh-key-and-adding-it-to-the-ssh-agent#adding-your-ssh-key-to-the-ssh-agent), if you have already uploaded SSH keys
-
-#### Anvil fork test failures
-
-Some versions of Foundry may limit contract code size to ~25kb, which could prevent local tests to fail. You can resolve this by setting the `code-size-limit` flag
-
-```
-anvil --code-size-limit 40000
-```
-
-#### Hook deployment failures
-
-Hook deployment failures are caused by incorrect flags or incorrect salt mining
-
-1. Verify the flags are in agreement:
-   - `getHookCalls()` returns the correct flags
-   - `flags` provided to `HookMiner.find(...)`
-2. Verify salt mining is correct:
-   - In **forge test**: the _deployer_ for: `new Hook{salt: salt}(...)` and `HookMiner.find(deployer, ...)` are the same. This will be `address(this)`. If using `vm.prank`, the deployer will be the pranking address
-   - In **forge script**: the deployer must be the CREATE2 Proxy: `0x4e59b44847b379578588920cA78FbF26c0B4956C`
-     - If anvil does not have the CREATE2 deployer, your foundry may be out of date. You can update it with `foundryup`
-
-</details>
-
-### Additional Resources
+## Additional resources
 
 - [Uniswap v4 docs](https://docs.uniswap.org/contracts/v4/overview)
-- [v4-periphery](https://github.com/uniswap/v4-periphery)
-- [v4-core](https://github.com/uniswap/v4-core)
-- [v4-by-example](https://v4-by-example.org)
+- [v4-core](https://github.com/uniswap/v4-core) / [v4-periphery](https://github.com/uniswap/v4-periphery)
+- [Gnosis Conditional Tokens Framework](https://github.com/gnosis/conditional-tokens-contracts)
+- [Gnosis Wrapped1155Factory](https://github.com/gnosis/1155-to-20)

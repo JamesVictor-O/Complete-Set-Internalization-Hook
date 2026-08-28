@@ -314,6 +314,163 @@ contract CompleteSetInternalizationHookTest is BaseTest {
         assertEq(afterTrades.lifetimeSurplus, 0);
     }
 
+    // =========================================================================================
+    // Fuzz tests on amount boundaries (bounded to `[1, market.collateralReserve]` — the CTF path's own
+    // operating range; above that the hook falls back to the AMM curve by design, a separate code path
+    // already covered by {test_swap_notProjectedToCrossParity_staysOnAmmCurve}).
+    // =========================================================================================
+
+    function testFuzz_swap_atParity_exactInput_fillsExactlyOneToOne(uint256 amount) public {
+        amount = bound(amount, 1, 1_000 ether);
+        address noToken = _giveTraderWrapped(false, amount);
+
+        vm.prank(trader);
+        swapRouter.swapExactTokensForTokens({
+            amountIn: amount,
+            amountOutMin: amount,
+            zeroForOne: !yesIsCurrency0,
+            poolKey: poolKey,
+            hookData: bytes(""),
+            receiver: trader,
+            deadline: block.timestamp + 1
+        });
+
+        assertEq(IERC20(noToken).balanceOf(trader), 0);
+        assertEq(IERC20(Currency.unwrap(yesCurrency)).balanceOf(trader), amount);
+
+        ICompleteSetInternalizationHook.Market memory market = hook.getMarket(poolId);
+        assertEq(market.collateralReserve, 1_000 ether - amount);
+        assertEq(market.outstandingSplitCost, amount);
+        assertEq(market.noInventory, amount);
+        assertEq(market.noClaimBalance, amount);
+        assertEq(market.yesInventory, 0);
+        assertEq(market.lifetimeSurplus, 0);
+    }
+
+    function testFuzz_swap_atParity_exactOutput_fillsExactlyOneToOne(uint256 amount) public {
+        amount = bound(amount, 1, 1_000 ether);
+        address noToken = _giveTraderWrapped(false, amount);
+
+        vm.prank(trader);
+        swapRouter.swapTokensForExactTokens({
+            amountOut: amount,
+            amountInMax: amount,
+            zeroForOne: !yesIsCurrency0,
+            poolKey: poolKey,
+            hookData: bytes(""),
+            receiver: trader,
+            deadline: block.timestamp + 1
+        });
+
+        assertEq(IERC20(noToken).balanceOf(trader), 0);
+        assertEq(IERC20(Currency.unwrap(yesCurrency)).balanceOf(trader), amount);
+        assertEq(hook.getMarket(poolId).collateralReserve, 1_000 ether - amount);
+    }
+
+    function testFuzz_depositCollateral_mintsSharesOneToOneAtStartingRatio(uint256 amount) public {
+        amount = bound(amount, 1, 1_000_000 ether);
+        address newLp = makeAddr("newLp");
+        collateral.mint(newLp, amount);
+
+        vm.startPrank(newLp);
+        collateral.approve(address(hook), amount);
+        uint256 sharesMinted = hook.depositCollateral(poolKey, amount);
+        vm.stopPrank();
+
+        // setUp's initial LP deposit established an exact 1:1 collateral:share ratio, and no trade has
+        // moved the reserve since, so every subsequent deposit at any amount must also mint 1:1.
+        assertEq(sharesMinted, amount);
+        assertEq(hook.sharesOf(poolId, newLp), amount);
+        assertEq(hook.getMarket(poolId).collateralReserve, 1_000 ether + amount);
+    }
+
+    function testFuzz_withdrawCollateral_returnsExactlyProportionalReserve(uint256 shares) public {
+        shares = bound(shares, 1, 1_000 ether); // lp holds exactly 1_000 ether shares from setUp
+        vm.prank(lp);
+        uint256 amountOut = hook.withdrawCollateral(poolKey, shares);
+
+        // Still an exact 1:1 ratio (no trade has touched the reserve), so amountOut must equal shares.
+        assertEq(amountOut, shares);
+        assertEq(collateral.balanceOf(lp), shares);
+        assertEq(hook.getMarket(poolId).collateralReserve, 1_000 ether - shares);
+    }
+
+    function testFuzz_withdrawCollateral_revertsAboveHeldShares(uint256 shares) public {
+        shares = bound(shares, 1_000 ether + 1, type(uint128).max);
+        vm.prank(lp);
+        vm.expectRevert(
+            abi.encodeWithSelector(ICompleteSetInternalizationHook.InsufficientShares.selector, shares, 1_000 ether)
+        );
+        hook.withdrawCollateral(poolKey, shares);
+    }
+
+    function testFuzz_symmetricRoundTrip_zeroSurplusAtAnyAmount(uint256 amount) public {
+        // Bounded to half the reserve (not the full `[1, 1_000 ether]` CTF-path range used elsewhere):
+        // each leg draws down the *same* shared reserve in sequence, so the second leg only stays fully
+        // CTF-fillable (this test's whole premise) if `amount <= collateralReserve / 2`. Above that, the
+        // second leg would legitimately fall through to the AMM curve instead (which has zero liquidity
+        // in this fixture and reverts) — a fuzz-bound artifact of a two-leg test sharing one reserve, not
+        // a hook defect.
+        amount = bound(amount, 1, 500 ether);
+        ICompleteSetInternalizationHook.Market memory before = hook.getMarket(poolId);
+
+        _giveTraderWrapped(false, amount);
+        vm.prank(trader);
+        swapRouter.swapExactTokensForTokens({
+            amountIn: amount,
+            amountOutMin: amount,
+            zeroForOne: !yesIsCurrency0,
+            poolKey: poolKey,
+            hookData: bytes(""),
+            receiver: trader,
+            deadline: block.timestamp + 1
+        });
+
+        _giveTraderWrapped(true, amount);
+        vm.prank(trader);
+        swapRouter.swapExactTokensForTokens({
+            amountIn: amount,
+            amountOutMin: amount,
+            zeroForOne: yesIsCurrency0,
+            poolKey: poolKey,
+            hookData: bytes(""),
+            receiver: trader,
+            deadline: block.timestamp + 1
+        });
+
+        hook.mergeIfPossible(poolKey);
+
+        ICompleteSetInternalizationHook.Market memory afterTrades = hook.getMarket(poolId);
+        assertEq(afterTrades.collateralReserve, before.collateralReserve);
+        assertEq(afterTrades.outstandingSplitCost, 0);
+        assertEq(afterTrades.yesInventory, 0);
+        assertEq(afterTrades.noInventory, 0);
+        assertEq(afterTrades.lifetimeSurplus, 0);
+    }
+
+    /// @dev Scoped to a low run count (via the forge-config comment below) — each run deploys a fresh
+    /// liquid market plus a full-range AMM position, which is comparatively expensive to fuzz broadly.
+    /// forge-config: default.fuzz.runs = 24
+    function testFuzz_harvestOpportunisticSurplus_revertsAboveIdleBoundary(uint256 excess) public {
+        LiquidMarket memory lm = _deployLiquidMarket(Constants.SQRT_PRICE_101_100);
+        _payCurrency0(lm, 100 ether);
+        lm.hook.sweepClaims(lm.key);
+
+        ICompleteSetInternalizationHook.Market memory m = lm.hook.getMarket(lm.poolId);
+        uint256 idle =
+            m.yesInventory > m.noInventory ? m.yesInventory - m.noInventory : m.noInventory - m.yesInventory;
+
+        excess = bound(excess, 1, 1_000_000 ether);
+        uint256 amountIn = idle + excess;
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                ICompleteSetInternalizationHook.InsufficientIdleInventory.selector, amountIn, idle
+            )
+        );
+        lm.hook.harvestOpportunisticSurplus(lm.key, amountIn, 0);
+    }
+
     function test_swap_revertsWhenMarketFrozen() public {
         _resolveAndFreeze();
 
