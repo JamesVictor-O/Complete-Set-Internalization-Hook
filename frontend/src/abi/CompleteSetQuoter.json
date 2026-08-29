@@ -1,0 +1,161 @@
+[
+  {
+    "type": "constructor",
+    "inputs": [
+      {
+        "name": "_poolManager",
+        "type": "address",
+        "internalType": "contract IPoolManager"
+      },
+      {
+        "name": "_hook",
+        "type": "address",
+        "internalType": "contract ICompleteSetInternalizationHook"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "hook",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "contract ICompleteSetInternalizationHook"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "poolManager",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "contract IPoolManager"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "quote",
+    "inputs": [
+      {
+        "name": "key",
+        "type": "tuple",
+        "internalType": "struct PoolKey",
+        "components": [
+          {
+            "name": "currency0",
+            "type": "address",
+            "internalType": "Currency"
+          },
+          {
+            "name": "currency1",
+            "type": "address",
+            "internalType": "Currency"
+          },
+          {
+            "name": "fee",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "tickSpacing",
+            "type": "int24",
+            "internalType": "int24"
+          },
+          {
+            "name": "hooks",
+            "type": "address",
+            "internalType": "contract IHooks"
+          }
+        ]
+      },
+      {
+        "name": "zeroForOne",
+        "type": "bool",
+        "internalType": "bool"
+      },
+      {
+        "name": "amountIn",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "result",
+        "type": "tuple",
+        "internalType": "struct CompleteSetQuoter.QuoteResult",
+        "components": [
+          {
+            "name": "ammQuote",
+            "type": "tuple",
+            "internalType": "struct CompleteSetQuoter.SwapQuote",
+            "components": [
+              {
+                "name": "outAmount",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "effectivePriceWad",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "priceImpactBps",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "available",
+                "type": "bool",
+                "internalType": "bool"
+              }
+            ]
+          },
+          {
+            "name": "ctfQuote",
+            "type": "tuple",
+            "internalType": "struct CompleteSetQuoter.SwapQuote",
+            "components": [
+              {
+                "name": "outAmount",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "effectivePriceWad",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "priceImpactBps",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "available",
+                "type": "bool",
+                "internalType": "bool"
+              }
+            ]
+          },
+          {
+            "name": "recommendCtf",
+            "type": "bool",
+            "internalType": "bool"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  }
+]
