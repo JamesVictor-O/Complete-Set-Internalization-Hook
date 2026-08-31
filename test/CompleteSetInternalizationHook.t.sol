@@ -77,12 +77,8 @@ contract CompleteSetInternalizationHookTest is BaseTest {
         IERC20 collateralAsIERC20 = IERC20(address(collateral));
         uint256 yesPositionId = CompleteSetLib.yesPositionId(collateralAsIERC20, conditionId);
         uint256 noPositionId = CompleteSetLib.noPositionId(collateralAsIERC20, conditionId);
-        address yesToken = wrapped1155Factory.requireWrapped1155(
-            conditionalTokens, yesPositionId, CompleteSetLib.encodeWrappedTokenData("YES", "YES", 18)
-        );
-        address noToken = wrapped1155Factory.requireWrapped1155(
-            conditionalTokens, noPositionId, CompleteSetLib.encodeWrappedTokenData("NO", "NO", 18)
-        );
+        address yesToken = wrapped1155Factory.requireWrapped1155(conditionalTokens, yesPositionId);
+        address noToken = wrapped1155Factory.requireWrapped1155(conditionalTokens, noPositionId);
 
         yesIsCurrency0 = yesToken < noToken;
         (Currency currency0, Currency currency1) =
@@ -131,7 +127,7 @@ contract CompleteSetInternalizationHookTest is BaseTest {
         uint256 positionId = wantYes
             ? CompleteSetLib.yesPositionId(IERC20(address(collateral)), conditionId)
             : CompleteSetLib.noPositionId(IERC20(address(collateral)), conditionId);
-        bytes memory wrapData = CompleteSetLib.encodeWrappedTokenData(wantYes ? "YES" : "NO", wantYes ? "YES" : "NO", 18);
+        bytes memory wrapData = CompleteSetLib.encodeWrappedTokenData(trader);
         token = wantYes
             ? Currency.unwrap(yesCurrency)
             : Currency.unwrap(noCurrency);
@@ -636,10 +632,10 @@ contract CompleteSetInternalizationHookTest is BaseTest {
         IERC20 collateralAsIERC20 = IERC20(address(collateral));
         lm.yesPositionId = CompleteSetLib.yesPositionId(collateralAsIERC20, lm.conditionId);
         lm.noPositionId = CompleteSetLib.noPositionId(collateralAsIERC20, lm.conditionId);
-        lm.yesWrapData = CompleteSetLib.encodeWrappedTokenData("LYES", "LYES", 18);
-        lm.noWrapData = CompleteSetLib.encodeWrappedTokenData("LNO", "LNO", 18);
-        address yesToken = wrapped1155Factory.requireWrapped1155(conditionalTokens, lm.yesPositionId, lm.yesWrapData);
-        address noToken = wrapped1155Factory.requireWrapped1155(conditionalTokens, lm.noPositionId, lm.noWrapData);
+        lm.yesWrapData = CompleteSetLib.encodeWrappedTokenData(address(lm.hook));
+        lm.noWrapData = CompleteSetLib.encodeWrappedTokenData(address(lm.hook));
+        address yesToken = wrapped1155Factory.requireWrapped1155(conditionalTokens, lm.yesPositionId);
+        address noToken = wrapped1155Factory.requireWrapped1155(conditionalTokens, lm.noPositionId);
 
         lm.yesIsCurrency0 = yesToken < noToken;
         (Currency c0, Currency c1) = lm.yesIsCurrency0
@@ -705,7 +701,9 @@ contract CompleteSetInternalizationHookTest is BaseTest {
         conditionalTokens.splitPosition(
             IERC20(address(collateral)), bytes32(0), cid, CompleteSetLib.binaryPartition(), amount
         );
-        conditionalTokens.safeTransferFrom(to, address(wrapped1155Factory), positionId, amount, wrapData);
+        conditionalTokens.safeTransferFrom(
+            to, address(wrapped1155Factory), positionId, amount, CompleteSetLib.encodeWrappedTokenData(to)
+        );
         vm.stopPrank();
     }
 

@@ -25,16 +25,16 @@ import {MockConditionalTokens} from "../test/mocks/MockConditionalTokens.sol";
 import {MockWrapped1155Factory} from "../test/mocks/MockWrapped1155Factory.sol";
 
 /// @notice Deploys {CompleteSetInternalizationHook} and {CompleteSetQuoter} end to end for the demo
-/// frontend: mines the hook's CREATE2 address, deploys it against a fresh demo CTF condition,
+/// frontend on local Anvil or Unichain Sepolia: mines the hook's CREATE2 address, deploys it against a fresh demo CTF condition,
 /// registers a YES/NO market initialized *off* 1:1 parity with real core AMM liquidity (so the AMM
 /// path and the CTF path genuinely differ - a pool started exactly at parity with no liquidity, like
 /// the test suite's default fixture, has nothing to contrast), seeds the hook's LP collateral reserve,
-/// pre-funds a well-known local demo trader with both wrapped legs, and writes every address the
+/// pre-funds the selected trader with both wrapped legs, and writes every address the
 /// frontend needs to `frontend/public/deployment.json`.
 /// @dev Uses the same 0.8.26-native mock CTF/Wrapped1155Factory the test suite uses (see their NatSpec
 /// for why the real Gnosis contracts, being pragma ^0.5.1/^0.6.0, can't be deployed from this script
-/// directly). Swap in real, already-deployed CTF/Wrapped1155Factory addresses here once a target chain
-/// with a live CTF deployment is chosen.
+/// directly). On Unichain Sepolia these demo contracts are deliberately deployed alongside the hook;
+/// compatibility with Gnosis's production contracts is covered separately by the live fork tests.
 contract DeployCompleteSetInternalizationHookScript is BaseScript, LiquidityHelpers {
     /////////////////////////////////////
     // --- Configure These ---
@@ -51,6 +51,8 @@ contract DeployCompleteSetInternalizationHookScript is BaseScript, LiquidityHelp
     // Anvil's default account #1 (well-known private key) - the frontend's local demo connector signs
     // as this exact address, so it needs to already hold tokens before anyone opens the page.
     address constant DEMO_TRADER = 0x70997970C51812dc3A010C7d01b50e0d17dc79C8;
+    uint256 constant ANVIL_CHAIN_ID = 31337;
+    uint256 constant UNICHAIN_SEPOLIA_CHAIN_ID = 1301;
     /////////////////////////////////////
 
     /// @dev Bundles every piece of state the deploy steps below need to share, purely to stay under
@@ -72,15 +74,20 @@ contract DeployCompleteSetInternalizationHookScript is BaseScript, LiquidityHelp
     }
 
     function run() external {
+        require(
+            block.chainid == ANVIL_CHAIN_ID || block.chainid == UNICHAIN_SEPOLIA_CHAIN_ID,
+            "DeployCompleteSetInternalizationHookScript: unsupported chain"
+        );
         vm.startBroadcast();
         DemoMarket memory dm = _deployHookAndMarket();
         _seedReserve(dm);
         _seedCoreLiquidity(dm);
-        _fundDemoTrader(dm);
+        _fundTrader(dm);
         vm.stopBroadcast();
 
-        _writeDeploymentJson(dm);
-        _logSummary(dm);
+        bool wroteDeploymentJson = vm.envOr("WRITE_DEPLOYMENT_JSON", true);
+        if (wroteDeploymentJson) _writeDeploymentJson(dm);
+        _logSummary(dm, wroteDeploymentJson);
     }
 
     function _deployHookAndMarket() private returns (DemoMarket memory dm) {
@@ -106,12 +113,8 @@ contract DeployCompleteSetInternalizationHookScript is BaseScript, LiquidityHelp
         IERC20 collateralAsIERC20 = IERC20(address(dm.collateral));
         dm.yesPositionId = CompleteSetLib.yesPositionId(collateralAsIERC20, dm.conditionId);
         dm.noPositionId = CompleteSetLib.noPositionId(collateralAsIERC20, dm.conditionId);
-        dm.yesToken = dm.wrapped1155Factory.requireWrapped1155(
-            dm.conditionalTokens, dm.yesPositionId, CompleteSetLib.encodeWrappedTokenData("YES", "YES", 18)
-        );
-        dm.noToken = dm.wrapped1155Factory.requireWrapped1155(
-            dm.conditionalTokens, dm.noPositionId, CompleteSetLib.encodeWrappedTokenData("NO", "NO", 18)
-        );
+        dm.yesToken = dm.wrapped1155Factory.requireWrapped1155(dm.conditionalTokens, dm.yesPositionId);
+        dm.noToken = dm.wrapped1155Factory.requireWrapped1155(dm.conditionalTokens, dm.noPositionId);
 
         dm.yesIsCurrency0 = dm.yesToken < dm.noToken;
         (Currency c0, Currency c1) = dm.yesIsCurrency0
@@ -180,7 +183,7 @@ contract DeployCompleteSetInternalizationHookScript is BaseScript, LiquidityHelp
             IERC20(address(dm.collateral)), bytes32(0), dm.conditionId, CompleteSetLib.binaryPartition(), amount
         );
         uint256 positionId = wantYes ? dm.yesPositionId : dm.noPositionId;
-        bytes memory wrapData = CompleteSetLib.encodeWrappedTokenData(wantYes ? "YES" : "NO", wantYes ? "YES" : "NO", 18);
+        bytes memory wrapData = CompleteSetLib.encodeWrappedTokenData(deployerAddress);
         dm.conditionalTokens.safeTransferFrom(deployerAddress, address(dm.wrapped1155Factory), positionId, amount, wrapData);
         if (to != deployerAddress) {
             address token = wantYes ? dm.yesToken : dm.noToken;
@@ -188,9 +191,16 @@ contract DeployCompleteSetInternalizationHookScript is BaseScript, LiquidityHelp
         }
     }
 
-    function _fundDemoTrader(DemoMarket memory dm) private {
-        _mintWrapped(dm, true, DEMO_TRADER, DEMO_TRADER_FUNDING);
-        _mintWrapped(dm, false, DEMO_TRADER, DEMO_TRADER_FUNDING);
+    function _fundTrader(DemoMarket memory dm) private {
+        address trader = _traderAddress();
+        _mintWrapped(dm, true, trader, DEMO_TRADER_FUNDING);
+        _mintWrapped(dm, false, trader, DEMO_TRADER_FUNDING);
+    }
+
+    function _traderAddress() private view returns (address) {
+        // Only Anvil can sign transactions for its well-known demo account. On testnet, fund the
+        // broadcasting wallet so the same wallet can immediately exercise the deployed UI.
+        return block.chainid == ANVIL_CHAIN_ID ? DEMO_TRADER : deployerAddress;
     }
 
     function _writeDeploymentJson(DemoMarket memory dm) private {
@@ -211,7 +221,7 @@ contract DeployCompleteSetInternalizationHookScript is BaseScript, LiquidityHelp
         );
         string memory part3 = string.concat(
             '"noToken":"', vm.toString(dm.noToken), '",',
-            '"demoTrader":"', vm.toString(DEMO_TRADER), '",',
+            '"demoTrader":"', vm.toString(_traderAddress()), '",',
             '"marketQuestion":"Will ETH be above $5,000 on Sept 30?",',
             '"poolKey":', poolKeyJson, "}"
         );
@@ -230,7 +240,7 @@ contract DeployCompleteSetInternalizationHookScript is BaseScript, LiquidityHelp
         );
     }
 
-    function _logSummary(DemoMarket memory dm) private pure {
+    function _logSummary(DemoMarket memory dm, bool wroteDeploymentJson) private view {
         console2.log("CompleteSetInternalizationHook deployed at:", address(dm.hook));
         console2.log("CompleteSetQuoter deployed at:", address(dm.quoter));
         console2.log("Demo collateral (dUSD):", address(dm.collateral));
@@ -238,7 +248,7 @@ contract DeployCompleteSetInternalizationHookScript is BaseScript, LiquidityHelp
         console2.log("NO token:", dm.noToken);
         console2.log("LP reserve seeded:", LP_RESERVE);
         console2.log("Core AMM liquidity seeded:", CORE_LIQUIDITY);
-        console2.log("Demo trader funded at:", DEMO_TRADER);
-        console2.log("Wrote frontend/public/deployment.json");
+        console2.log("Trader funded at:", _traderAddress());
+        if (wroteDeploymentJson) console2.log("Wrote frontend/public/deployment.json");
     }
 }

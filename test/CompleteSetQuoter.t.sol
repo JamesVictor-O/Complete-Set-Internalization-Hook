@@ -69,12 +69,8 @@ contract CompleteSetQuoterTest is BaseTest {
         IERC20 collateralAsIERC20 = IERC20(address(collateral));
         uint256 yesPositionId = CompleteSetLib.yesPositionId(collateralAsIERC20, conditionId);
         uint256 noPositionId = CompleteSetLib.noPositionId(collateralAsIERC20, conditionId);
-        address yesToken = wrapped1155Factory.requireWrapped1155(
-            conditionalTokens, yesPositionId, CompleteSetLib.encodeWrappedTokenData("YES", "YES", 18)
-        );
-        address noToken = wrapped1155Factory.requireWrapped1155(
-            conditionalTokens, noPositionId, CompleteSetLib.encodeWrappedTokenData("NO", "NO", 18)
-        );
+        address yesToken = wrapped1155Factory.requireWrapped1155(conditionalTokens, yesPositionId);
+        address noToken = wrapped1155Factory.requireWrapped1155(conditionalTokens, noPositionId);
 
         yesIsCurrency0 = yesToken < noToken;
         (Currency currency0, Currency currency1) = yesIsCurrency0
@@ -139,12 +135,8 @@ contract CompleteSetQuoterTest is BaseTest {
         IERC20 collateralAsIERC20 = IERC20(address(collateral));
         uint256 yesPositionId = CompleteSetLib.yesPositionId(collateralAsIERC20, liquidConditionId);
         uint256 noPositionId = CompleteSetLib.noPositionId(collateralAsIERC20, liquidConditionId);
-        address liquidYesToken = wrapped1155Factory.requireWrapped1155(
-            conditionalTokens, yesPositionId, CompleteSetLib.encodeWrappedTokenData("LYES", "LYES", 18)
-        );
-        address liquidNoToken = wrapped1155Factory.requireWrapped1155(
-            conditionalTokens, noPositionId, CompleteSetLib.encodeWrappedTokenData("LNO", "LNO", 18)
-        );
+        address liquidYesToken = wrapped1155Factory.requireWrapped1155(conditionalTokens, yesPositionId);
+        address liquidNoToken = wrapped1155Factory.requireWrapped1155(conditionalTokens, noPositionId);
         bool liquidYesIsCurrency0 = liquidYesToken < liquidNoToken;
         (Currency c0, Currency c1) = liquidYesIsCurrency0
             ? (Currency.wrap(liquidYesToken), Currency.wrap(liquidNoToken))
@@ -213,7 +205,7 @@ contract CompleteSetQuoterTest is BaseTest {
         conditionalTokens.splitPosition(
             IERC20(address(collateral)), bytes32(0), forConditionId, CompleteSetLib.binaryPartition(), amount
         );
-        bytes memory wrapData = CompleteSetLib.encodeWrappedTokenData(symbol, symbol, 18);
+        bytes memory wrapData = CompleteSetLib.encodeWrappedTokenData(to);
         conditionalTokens.safeTransferFrom(to, address(wrapped1155Factory), positionId, amount, wrapData);
         vm.stopPrank();
     }

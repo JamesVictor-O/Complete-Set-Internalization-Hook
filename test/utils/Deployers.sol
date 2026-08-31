@@ -69,9 +69,27 @@ abstract contract Deployers {
         permit2 = IPermit2(permit2Address);
     }
 
+    /// @dev `V4*Deployer.deploy` creates these contracts via `DeployHelper`'s `create2` with a fixed
+    /// zero salt, called from this contract's own constructor — i.e. outside any `vm.startBroadcast()`
+    /// region. For `forge test` that's fine: the whole run lives inside forge's own local EVM, so the
+    /// freshly-created code is already visible to everything. For `forge script` against an
+    /// already-running external node (e.g. a long-lived local Anvil a frontend talks to), a
+    /// constructor-time `new`/`create2` is *never* broadcast as a real transaction — the contract only
+    /// exists in forge's local simulation. Without re-pushing the code via `_etch` (the mechanism
+    /// {deployPermit2} already relies on), later broadcast transactions that call into these addresses
+    /// would silently hit empty accounts. And because the salt is fixed, re-running against a node that
+    /// already has a prior `_etch` at that same deterministic address must skip the local `create2`
+    /// entirely — attempting it again is a real, reverting address collision, not a no-op.
     function deployPoolManager() internal virtual {
         if (block.chainid == 31337) {
-            poolManager = IPoolManager(V4PoolManagerDeployer.deploy(address(0x4444)));
+            bytes memory initcode_ = abi.encodePacked(V4PoolManagerDeployer.initcode(), abi.encode(address(0x4444)));
+            address predicted = _predictCreate2Address(initcode_);
+            if (predicted.code.length > 0) {
+                poolManager = IPoolManager(predicted);
+            } else {
+                poolManager = IPoolManager(V4PoolManagerDeployer.deploy(address(0x4444)));
+                _etch(address(poolManager), address(poolManager).code);
+            }
         } else {
             poolManager = IPoolManager(AddressConstants.getPoolManagerAddress(block.chainid));
         }
@@ -79,11 +97,19 @@ abstract contract Deployers {
 
     function deployPositionManager() internal virtual {
         if (block.chainid == 31337) {
-            positionManager = IPositionManager(
-                V4PositionManagerDeployer.deploy(
-                    address(poolManager), address(permit2), 300_000, address(0), address(0)
-                )
-            );
+            bytes memory args = abi.encode(address(poolManager), address(permit2), uint256(300_000), address(0), address(0));
+            bytes memory initcode_ = abi.encodePacked(V4PositionManagerDeployer.initcode(), args);
+            address predicted = _predictCreate2Address(initcode_);
+            if (predicted.code.length > 0) {
+                positionManager = IPositionManager(predicted);
+            } else {
+                positionManager = IPositionManager(
+                    V4PositionManagerDeployer.deploy(
+                        address(poolManager), address(permit2), 300_000, address(0), address(0)
+                    )
+                );
+                _etch(address(positionManager), address(positionManager).code);
+            }
         } else {
             positionManager = IPositionManager(AddressConstants.getPositionManagerAddress(block.chainid));
         }
@@ -91,10 +117,26 @@ abstract contract Deployers {
 
     function deployRouter() internal virtual {
         if (block.chainid == 31337) {
-            swapRouter = IUniswapV4Router04(payable(V4RouterDeployer.deploy(address(poolManager), address(permit2))));
+            bytes memory args = abi.encode(address(poolManager), address(permit2));
+            bytes memory initcode_ = abi.encodePacked(V4RouterDeployer.initcode(), args);
+            address predicted = _predictCreate2Address(initcode_);
+            if (predicted.code.length > 0) {
+                swapRouter = IUniswapV4Router04(payable(predicted));
+            } else {
+                swapRouter =
+                    IUniswapV4Router04(payable(V4RouterDeployer.deploy(address(poolManager), address(permit2))));
+                _etch(address(swapRouter), address(swapRouter).code);
+            }
         } else {
             swapRouter = IUniswapV4Router04(payable(AddressConstants.getV4SwapRouterAddress(block.chainid)));
         }
+    }
+
+    /// @dev Mirrors `DeployHelper.deploy`'s `create2(0, ..., salt=0)` address formula so callers can
+    /// check whether a deterministic deployment already exists on-chain *before* attempting it again.
+    function _predictCreate2Address(bytes memory initcode_) private view returns (address predicted) {
+        bytes32 hash = keccak256(abi.encodePacked(bytes1(0xff), address(this), bytes32(0), keccak256(initcode_)));
+        predicted = address(uint160(uint256(hash)));
     }
 
     function _etch(address, bytes memory) internal virtual {

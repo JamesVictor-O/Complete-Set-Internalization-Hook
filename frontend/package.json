@@ -4,8 +4,11 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
+    "dev": "VITE_TARGET_CHAIN_ID=1301 vite",
+    "dev:unichain": "VITE_TARGET_CHAIN_ID=1301 vite",
+    "dev:local": "VITE_TARGET_CHAIN_ID=31337 vite",
+    "build": "VITE_TARGET_CHAIN_ID=1301 tsc -b && VITE_TARGET_CHAIN_ID=1301 vite build",
+    "build:unichain": "VITE_TARGET_CHAIN_ID=1301 tsc -b && VITE_TARGET_CHAIN_ID=1301 vite build",
     "lint": "oxlint",
     "preview": "vite preview"
   },

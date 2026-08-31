@@ -83,16 +83,9 @@ library CompleteSetLib {
         return getPositionId(collateralToken, getCollectionId(bytes32(0), conditionId, NO_INDEX_SET));
     }
 
-    /// @notice Packs a wrapped-ERC20 name/symbol/decimals into the 65-byte `data` layout
-    /// `Wrapped1155Factory` expects: 32 bytes name, 32 bytes symbol, 1 byte decimals.
-    /// @dev Names/symbols longer than 32 bytes are truncated by the `bytes32` cast, matching the
-    /// factory's own fixed-width encoding.
-    function encodeWrappedTokenData(string memory name, string memory symbol, uint8 decimals)
-        internal
-        pure
-        returns (bytes memory)
-    {
-        return abi.encodePacked(bytes32(bytes(name)), bytes32(bytes(symbol)), decimals);
+    /// @notice Encodes the recipient required by the legacy Gnosis factory's ERC-1155 receiver.
+    function encodeWrappedTokenData(address recipient) internal pure returns (bytes memory) {
+        return abi.encode(recipient);
     }
 
     // -- Below: the CTF-call-heavy operations shared by the hook's swap and inventory-recycling paths.
@@ -214,30 +207,26 @@ library CompleteSetLib {
         ICompleteSetInternalizationHook.Market storage market,
         IERC20 collateralToken,
         bytes32 conditionId,
-        string calldata yesName,
-        string calldata yesSymbol,
-        string calldata noName,
-        string calldata noSymbol
+        string calldata,
+        string calldata,
+        string calldata,
+        string calldata
     ) private {
-        _setPositionFields(market, collateralToken, conditionId, yesName, yesSymbol, noName, noSymbol);
+        _setPositionFields(market, collateralToken, conditionId);
         _wrapCurrencies(wrapped1155Factory, conditionalTokens, market);
     }
 
     function _setPositionFields(
         ICompleteSetInternalizationHook.Market storage market,
         IERC20 collateralToken,
-        bytes32 conditionId,
-        string calldata yesName,
-        string calldata yesSymbol,
-        string calldata noName,
-        string calldata noSymbol
+        bytes32 conditionId
     ) private {
         market.collateralToken = collateralToken;
         market.conditionId = conditionId;
         market.yesPositionId = yesPositionId(collateralToken, conditionId);
         market.noPositionId = noPositionId(collateralToken, conditionId);
-        market.yesWrapData = encodeWrappedTokenData(yesName, yesSymbol, 18);
-        market.noWrapData = encodeWrappedTokenData(noName, noSymbol, 18);
+        market.yesWrapData = encodeWrappedTokenData(address(this));
+        market.noWrapData = encodeWrappedTokenData(address(this));
     }
 
     function _wrapCurrencies(
@@ -245,10 +234,8 @@ library CompleteSetLib {
         IConditionalTokens conditionalTokens,
         ICompleteSetInternalizationHook.Market storage market
     ) private {
-        market.yesCurrency =
-            Currency.wrap(wrapped1155Factory.requireWrapped1155(conditionalTokens, market.yesPositionId, market.yesWrapData));
-        market.noCurrency =
-            Currency.wrap(wrapped1155Factory.requireWrapped1155(conditionalTokens, market.noPositionId, market.noWrapData));
+        market.yesCurrency = Currency.wrap(wrapped1155Factory.requireWrapped1155(conditionalTokens, market.yesPositionId));
+        market.noCurrency = Currency.wrap(wrapped1155Factory.requireWrapped1155(conditionalTokens, market.noPositionId));
     }
 
     function _requireMatchesPoolCurrencies(PoolKey calldata key, Currency yesCurrency, Currency noCurrency)

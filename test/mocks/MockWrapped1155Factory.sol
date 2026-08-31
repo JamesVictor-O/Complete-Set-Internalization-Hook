@@ -40,21 +40,16 @@ contract MockWrapped1155 is ERC20 {
 contract MockWrapped1155Factory is IWrapped1155Factory, ERC1155Holder {
     mapping(IERC1155 => mapping(uint256 => MockWrapped1155)) internal _wrapped;
 
-    function requireWrapped1155(IERC1155 multiToken, uint256 tokenId, bytes calldata data)
-        external
-        override
-        returns (address)
-    {
+    function requireWrapped1155(IERC1155 multiToken, uint256 tokenId) external override returns (address) {
         MockWrapped1155 wrapped = _wrapped[multiToken][tokenId];
         if (address(wrapped) != address(0)) return address(wrapped);
 
-        (string memory name_, string memory symbol_) = _decodeNameSymbol(data);
-        wrapped = new MockWrapped1155(name_, symbol_);
+        wrapped = new MockWrapped1155("Wrapped ERC-1155", "WMT");
         _wrapped[multiToken][tokenId] = wrapped;
         return address(wrapped);
     }
 
-    function getWrapped1155(IERC1155 multiToken, uint256 tokenId, bytes calldata) external view returns (address) {
+    function getWrapped1155(IERC1155 multiToken, uint256 tokenId) external view returns (address) {
         return address(_wrapped[multiToken][tokenId]);
     }
 
@@ -72,33 +67,11 @@ contract MockWrapped1155Factory is IWrapped1155Factory, ERC1155Holder {
     {
         MockWrapped1155 wrapped = _wrapped[IERC1155(msg.sender)][id];
         if (address(wrapped) == address(0)) {
-            (string memory name_, string memory symbol_) = _decodeNameSymbol(data);
-            wrapped = new MockWrapped1155(name_, symbol_);
+            wrapped = new MockWrapped1155("Wrapped ERC-1155", "WMT");
             _wrapped[IERC1155(msg.sender)][id] = wrapped;
         }
-        wrapped.mint(operator, value);
+        address recipient = abi.decode(data, (address));
+        wrapped.mint(recipient, value);
         return super.onERC1155Received(operator, address(0), id, value, data);
-    }
-
-    function _decodeNameSymbol(bytes memory data) internal pure returns (string memory name_, string memory symbol_) {
-        require(data.length == 65, "MockWrapped1155Factory: bad data length");
-        bytes32 nameWord;
-        bytes32 symbolWord;
-        assembly {
-            nameWord := mload(add(data, 32))
-            symbolWord := mload(add(data, 64))
-        }
-        name_ = _bytes32ToTrimmedString(nameWord);
-        symbol_ = _bytes32ToTrimmedString(symbolWord);
-    }
-
-    function _bytes32ToTrimmedString(bytes32 raw) internal pure returns (string memory) {
-        uint256 len;
-        while (len < 32 && raw[len] != 0) len++;
-        bytes memory out = new bytes(len);
-        for (uint256 i = 0; i < len; i++) {
-            out[i] = raw[i];
-        }
-        return string(out);
     }
 }

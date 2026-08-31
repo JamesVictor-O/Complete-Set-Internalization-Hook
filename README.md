@@ -7,6 +7,11 @@ and a hard price-impact backstop for binary-outcome (YES/NO) pools.**
 Submitted as a graduation project for the Uniswap Hook Incubator (UHI), hosted by Atrium —
 Sustainable Liquidity & MEV Protection track.
 
+> **Live on Unichain Sepolia:**
+> [`CompleteSetInternalizationHook — 0xc88B0aC546a99B586199dDBeE30D801Ee1d80088`](https://sepolia.uniscan.xyz/address/0xc88B0aC546a99B586199dDBeE30D801Ee1d80088)
+> · [deployment transaction](https://sepolia.uniscan.xyz/tx/0x1a9052149599281a934f1df96205a5d3ed9eb10aec14b2a135a83d5b71130623)
+> · [full deployment details](#live-deployment--unichain-sepolia)
+
 ## Reviewer's guide — where everything is implemented
 
 New to this repo? Start here. Every row below is a specific, checkable claim — the file and
@@ -25,9 +30,9 @@ line is where to go read the actual code, not take this table's word for it. `fo
 | **Mechanism B** — opportunistic surplus harvesting: sell idle YES/NO inventory into the pool's *own* curve, hard on-chain no-lose floor | [`harvestOpportunisticSurplus`, `src/CompleteSetInternalizationHook.sol:249`](src/CompleteSetInternalizationHook.sol#L249) → [`sellIdleLegOnCurve`, `CompleteSetLib.sol:331`](src/libraries/CompleteSetLib.sol#L331) | Realizes real, positive surplus: [`:780`](test/CompleteSetInternalizationHook.t.sol#L780); the no-lose floor actually reverts an unprofitable trade: [`:840`](test/CompleteSetInternalizationHook.t.sol#L840) |
 | Resolution → redemption lifecycle | [`freezeForResolution` / `redeemAfterResolution`, `src/CompleteSetInternalizationHook.sol:346` / `:357`](src/CompleteSetInternalizationHook.sol#L346) | [`:544`](test/CompleteSetInternalizationHook.t.sol#L544) |
 | Ported CTF ID math (the highest-risk piece — must match the real contract bit-for-bit) | [`getConditionId`/`getPositionId`/`getCollectionId`, `src/libraries/CompleteSetLib.sol:63`](src/libraries/CompleteSetLib.sol#L63) onward (the alt_bn128 modular-sqrt routine runs from [`:456`](src/libraries/CompleteSetLib.sol#L456) to end of file) | Sanity-checked against itself in [`test/CompleteSetLib.t.sol`](test/CompleteSetLib.t.sol) — and verified against the **real deployed contract**, next row |
-| **Proof this works against the real Gnosis CTF, not just mocks** | [`test/fork/CompleteSetInternalizationHookFork.t.sol`](test/fork/CompleteSetInternalizationHookFork.t.sol) | Forks Gnosis Chain live and runs split/merge/redeem against `0xCeAfDD6b...` — the exact contract Omen's prediction markets run production TVL through. All 3 tests pass against real bytecode |
-| A runnable, working demo — not just tests | [`script/00_DeployCompleteSetInternalizationHook.s.sol`](script/00_DeployCompleteSetInternalizationHook.s.sol) | Deploys the hook, prepares a real CTF condition, registers a market, seeds LP capital, and executes a live swap through the CTF backstop — see [Deploying](#deploying) |
-| Full test suite | `test/CompleteSetInternalizationHook.t.sol` (25 tests incl. 7 fuzz), `test/CompleteSetLib.t.sol` (5), `test/fork/...` (3) | **39/39 passing** — run `forge test` |
+| **Proof this works against the real Gnosis contracts, not just mocks** | [`test/fork/CompleteSetInternalizationHookFork.t.sol`](test/fork/CompleteSetInternalizationHookFork.t.sol) | Forks Gnosis Chain live and runs split/merge/redeem against CTF `0xCeAfDD6b...`, plus a wrap/unwrap round trip against the legacy Wrapped1155Factory `0xEC9Cc784...`. All 4 tests pass against real bytecode |
+| A runnable, working demo — not just tests | [`script/00_DeployCompleteSetInternalizationHook.s.sol`](script/00_DeployCompleteSetInternalizationHook.s.sol) | Deploys the hook, prepares a CTF condition, registers a market, and seeds hook reserve plus core AMM liquidity — see [Deploying](#deploying) |
+| Full test suite | Hook (25 tests incl. 7 fuzz), library (5), quoter (4), v4 utility (6), and real-contract fork tests (4) | **44/44 passing** — run `forge test` |
 
 ## The idea
 
@@ -68,8 +73,8 @@ test/
   mocks/                                 0.8.26-native re-implementations of CTF/Wrapped1155Factory
 ```
 
-The real `ConditionalTokens` (`lib/conditional-tokens-contracts`, pragma `^0.5.1`) and
-`Wrapped1155Factory` (`lib/1155-to-20`, pragma `>=0.6.0`) can't be imported directly into this
+The real `ConditionalTokens` (`lib/conditional-tokens-contracts`, pragma `^0.5.1`) and legacy
+`Wrapped1155Factory` can't be imported directly into this
 `^0.8.26` project, so the hook talks to them through minimal ABI-compatible interfaces, and
 the test suite exercises those interfaces against 0.8.26-native mocks that reproduce the real
 contracts' split/merge/redeem/wrap economics (see each mock's NatSpec for exactly what is and
@@ -110,19 +115,29 @@ covered above, multi-outcome markets, advanced post-resolution auctions, intent-
 cross-chain routing, complex fee tiers or dynamic fees.
 
 **Known gaps / next steps**
-- No live testnet deployment yet.
-- **Wrapped1155Factory on Gnosis Chain is an older, incompatible ABI.** The fork test below found
-  that the live deployment at `0xEC9Cc78463b72D7246E8189Df5EeD5fDc3508E71` only exposes
-  `requireWrapped1155(address,uint256)` (2 args, no per-token custom naming) — not the
-  3-argument `(address, uint256, bytes data)` version this project's `IWrapped1155Factory` and
-  every wrap call in the hook assume (confirmed by extracting the deployed dispatcher's PUSH4
-  selectors and matching them via `cast 4byte`, since the deployed contract predates Gnosis's
-  `1155-to-20` `master` branch adding per-token naming). Before pointing this hook at Gnosis
-  Chain for real, this needs one of: locating a newer Wrapped1155Factory deployment elsewhere
-  with the 3-argument ABI, deploying a fresh instance of the current version, or adapting
-  `IWrapped1155Factory` to this deployment's 2-argument ABI. The real `ConditionalTokens` at
-  `0xCeAfDD6bc0bEF976fdCd1112955828E00543c0Ce` has no such issue — every function this project
-  calls on it matches exactly (see the fork test).
+- The Gnosis Chain factory predates per-position token metadata, so its wrappers use the generic
+  `Wrapped ERC-1155` / `WMT` name and symbol. The hook now uses that deployment's two-argument ABI
+  and explicit recipient payload, verified by the live fork wrap/unwrap test.
+
+## Live deployment — Unichain Sepolia
+
+The complete demo is deployed on Unichain Sepolia (chain ID `1301`) against the canonical Uniswap v4
+PoolManager. The deployment includes the hook, quoter, demo CTF/factory/collateral, a registered
+YES/NO pool, 1,000 dUSD of hook reserve, and seeded core AMM liquidity.
+
+| Contract | Address |
+|---|---|
+| CompleteSetInternalizationHook | [`0xc88B...0088`](https://sepolia.uniscan.xyz/address/0xc88B0aC546a99B586199dDBeE30D801Ee1d80088) |
+| CompleteSetQuoter | [`0xd4B7...eE1B`](https://sepolia.uniscan.xyz/address/0xd4B7fCecE89ABE7cAEd26aB34b548465ae05eE1B) |
+| Demo collateral (dUSD) | [`0x0115...Fa31`](https://sepolia.uniscan.xyz/address/0x0115CA8539906db2d9a4beE36C64eA94a0d7Fa31) |
+| YES wrapper | [`0xfF66...F339`](https://sepolia.uniscan.xyz/address/0xfF6687aB57eF24a4150f0A17755Ca24436B1F339) |
+| NO wrapper | [`0x7544...21f5`](https://sepolia.uniscan.xyz/address/0x75445557CF3498CE5062F2A7BDE70161cDBE21f5) |
+| Canonical v4 PoolManager | [`0x00B0...62AC`](https://sepolia.uniscan.xyz/address/0x00B036B58a818B1BC34d502D3fE730Db729e62AC) |
+
+Pool ID: `0x8b82518d80bc964538ec4866ef5d91ca13e2df7d2a9885d8adf32ac715650218`.
+
+Hook deployment transaction:
+[`0x1a905214...71130623`](https://sepolia.uniscan.xyz/tx/0x1a9052149599281a934f1df96205a5d3ed9eb10aec14b2a135a83d5b71130623).
 
 ## Development
 
@@ -165,8 +180,9 @@ forge test --match-contract "CompleteSetInternalizationHookForkTest"
 
 `script/00_DeployCompleteSetInternalizationHook.s.sol` mines a CREATE2 salt for the hook's
 permission flags, deploys it, deploys a demo binary market (backed by the same mock CTF /
-Wrapped1155Factory the test suite uses), registers it against a new pool, and seeds an LP
-reserve — a self-contained, runnable demo.
+Wrapped1155Factory the test suite uses), registers it against a new pool, and seeds both its LP
+reserve and core AMM liquidity. It supports local Anvil and Unichain Sepolia. On Unichain Sepolia it
+uses the canonical Uniswap v4 PoolManager, PositionManager, Permit2, and Hookmate swap router.
 
 Local (Anvil):
 
@@ -184,11 +200,39 @@ Against a live network, use a keystore account rather than a raw private key:
 cast wallet import <KEY_NAME> --interactive
 
 forge script script/00_DeployCompleteSetInternalizationHook.s.sol \
-    --rpc-url <YOUR_RPC_URL> \
+    --rpc-url unichain_sepolia \
     --account <KEY_NAME> \
     --sender <YOUR_WALLET_ADDRESS> \
     --broadcast
 ```
+
+For Unichain Sepolia, set the RPC endpoint, obtain testnet ETH for the deployer, then deploy:
+
+```bash
+# The official public endpoint exposes flashblocks that can race Forge's fork initialization.
+# PublicNode returns a fully retrievable latest block and is more reliable for deployment scripts.
+export UNICHAIN_SEPOLIA_RPC_URL=https://unichain-sepolia-rpc.publicnode.com
+export DEPLOYER_ADDRESS=<YOUR_WALLET_ADDRESS>
+
+forge script script/00_DeployCompleteSetInternalizationHook.s.sol \
+    --rpc-url unichain_sepolia \
+    --account <KEY_NAME> \
+    --sender <YOUR_WALLET_ADDRESS> \
+    --broadcast \
+    -vv
+```
+
+The script writes the resulting addresses to `frontend/public/deployment.json` and funds the
+broadcasting wallet with demo YES/NO tokens. Build or run the frontend in testnet mode with:
+
+```bash
+cd frontend
+pnpm build:unichain
+# or: pnpm dev:unichain
+```
+
+The no-extension “demo trader” button is intentionally disabled on testnet because JSON-RPC account
+impersonation is an Anvil-only feature; use the funded broadcasting wallet instead.
 
 ## Additional resources
 

@@ -8,6 +8,7 @@ import {ERC1155Holder} from "openzeppelin/token/ERC1155/utils/ERC1155Holder.sol"
 import {IERC20} from "openzeppelin/token/ERC20/IERC20.sol";
 
 import {IConditionalTokens} from "../../src/interfaces/IConditionalTokens.sol";
+import {IWrapped1155Factory} from "../../src/interfaces/IWrapped1155Factory.sol";
 import {CompleteSetLib} from "../../src/libraries/CompleteSetLib.sol";
 
 /// @notice Integration test against the REAL, already-deployed Gnosis `ConditionalTokens` contract on
@@ -20,20 +21,8 @@ import {CompleteSetLib} from "../../src/libraries/CompleteSetLib.sol";
 ///   forge test --match-contract CompleteSetInternalizationHookForkTest
 /// or exclude it from an offline run with `--no-match-path "test/fork/**"`.
 ///
-/// SCOPE NOTE — Wrapped1155Factory is intentionally NOT covered here. Verifying this test's target
-/// address (`0xEC9Cc78463b72D7246E8189Df5EeD5fDc3508E71`, confirmed live via `cast code`) turned up a
-/// real, important finding: the deployed contract's `requireWrapped1155`/`getWrapped1155` take only
-/// `(address multiToken, uint256 tokenId)` — confirmed by extracting its dispatcher's PUSH4 selectors
-/// and matching `0xd533249a`/`0x8920e891` to that 2-argument signature via `cast 4byte` — not the
-/// 3-argument `(address, uint256, bytes data)` form (with the packed name/symbol/decimals `data`
-/// argument) that this project's {IWrapped1155Factory} and every wrap call in
-/// {CompleteSetInternalizationHook} assume. That is an OLDER version of Gnosis's `1155-to-20` contract
-/// than the one currently on `master` (see that repo's `contracts/Wrapped1155Factory.sol`), deployed
-/// before per-token custom naming was added. Before pointing this hook at Gnosis Chain for real, this
-/// needs one of: locating a newer Wrapped1155Factory deployment elsewhere with the 3-argument ABI,
-/// deploying a fresh instance of the current version, or adapting {IWrapped1155Factory} to this
-/// deployment's 2-argument, non-customizable-naming ABI. Filed here rather than silently worked around,
-/// since it is exactly the kind of gap a real-contract integration test exists to catch.
+/// The fork also verifies the legacy two-argument Wrapped1155Factory ABI used by the live Gnosis
+/// deployment, including wrapper creation and a complete wrap/unwrap round trip.
 contract CompleteSetInternalizationHookForkTest is Test, ERC1155Holder {
     string constant GNOSIS_RPC = "https://gnosis-rpc.publicnode.com";
 
@@ -42,6 +31,8 @@ contract CompleteSetInternalizationHookForkTest is Test, ERC1155Holder {
     // Omen's prediction markets use, not a test double.
     IConditionalTokens constant REAL_CONDITIONAL_TOKENS =
         IConditionalTokens(0xCeAfDD6bc0bEF976fdCd1112955828E00543c0Ce);
+    IWrapped1155Factory constant REAL_WRAPPED_1155_FACTORY =
+        IWrapped1155Factory(0xEC9Cc78463b72D7246E8189Df5EeD5fDc3508E71);
 
     MockERC20 collateral;
     bytes32 conditionId;
@@ -83,6 +74,30 @@ contract CompleteSetInternalizationHookForkTest is Test, ERC1155Holder {
         // compute here, and these balance checks would read zero.
         assertEq(IERC1155(address(REAL_CONDITIONAL_TOKENS)).balanceOf(address(this), yesPositionId), amount);
         assertEq(IERC1155(address(REAL_CONDITIONAL_TOKENS)).balanceOf(address(this), noPositionId), amount);
+    }
+
+    function test_legacyWrapped1155Factory_wrapAndUnwrapRoundTrip() public {
+        uint256 amount = 10 ether;
+        collateral.mint(address(this), amount);
+        collateral.approve(address(REAL_CONDITIONAL_TOKENS), amount);
+        REAL_CONDITIONAL_TOKENS.splitPosition(
+            IERC20(address(collateral)), bytes32(0), conditionId, CompleteSetLib.binaryPartition(), amount
+        );
+
+        uint256 positionId = CompleteSetLib.yesPositionId(IERC20(address(collateral)), conditionId);
+        address wrapped = REAL_WRAPPED_1155_FACTORY.requireWrapped1155(REAL_CONDITIONAL_TOKENS, positionId);
+        bytes memory wrapData = CompleteSetLib.encodeWrappedTokenData(address(this));
+        REAL_CONDITIONAL_TOKENS.safeTransferFrom(
+            address(this), address(REAL_WRAPPED_1155_FACTORY), positionId, amount, wrapData
+        );
+        assertEq(IERC20(wrapped).balanceOf(address(this)), amount);
+
+        IERC20(wrapped).approve(address(REAL_WRAPPED_1155_FACTORY), amount);
+        REAL_WRAPPED_1155_FACTORY.unwrap(
+            REAL_CONDITIONAL_TOKENS, positionId, amount, address(this), wrapData
+        );
+        assertEq(IERC20(wrapped).balanceOf(address(this)), 0);
+        assertEq(REAL_CONDITIONAL_TOKENS.balanceOf(address(this), positionId), amount);
     }
 
     /// @notice Key Invariant #1 against real bytecode: a freshly split complete set can always be merged

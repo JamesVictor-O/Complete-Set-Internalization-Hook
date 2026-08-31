@@ -117,6 +117,8 @@ interface ICompleteSetInternalizationHook {
     /// @dev Reverts unless `key.currency0`/`key.currency1` are exactly the wrapped YES/NO ERC-20s that
     /// `conditionId` and `collateralToken` deterministically produce — the market's identity is
     /// self-authenticating, so this function is intentionally permissionless.
+    /// The name/symbol arguments are retained for caller compatibility but ignored by the legacy
+    /// Gnosis factory, whose wrappers use fixed metadata.
     function registerMarket(
         PoolKey calldata key,
         IERC20 collateralToken,

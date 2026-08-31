@@ -45,15 +45,10 @@ contract CompleteSetLibTest is Test {
         assertNotEq(id1, id3);
     }
 
-    function test_encodeWrappedTokenData_packsNameSymbolDecimalsInto65Bytes() public pure {
-        bytes memory data = CompleteSetLib.encodeWrappedTokenData("YES", "YES", 18);
-        assertEq(data.length, 65);
-        assertEq(uint8(data[64]), 18);
-
-        bytes32 nameWord;
-        assembly {
-            nameWord := mload(add(data, 32))
-        }
-        assertEq(nameWord, bytes32(bytes("YES")));
+    function test_encodeWrappedTokenData_encodesLegacyFactoryOperatorRecipient() public pure {
+        address recipient = address(0xBEEF);
+        bytes memory data = CompleteSetLib.encodeWrappedTokenData(recipient);
+        assertEq(data.length, 32);
+        assertEq(abi.decode(data, (address)), recipient);
     }
 }

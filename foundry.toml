@@ -12,6 +12,9 @@ solc_version = "0.8.26"
 src = "src"
 via_ir = true
 
+[rpc_endpoints]
+unichain_sepolia = "${UNICHAIN_SEPOLIA_RPC_URL}"
+
 [lint]
 exclude_lints = ["screaming-snake-case-immutable", "screaming-snake-case-const"]
 lint_on_build = false

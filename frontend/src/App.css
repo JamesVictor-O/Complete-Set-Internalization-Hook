@@ -45,6 +45,21 @@
   margin-bottom: 16px;
 }
 
+.network-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.wallet-error {
+  max-width: 360px;
+  margin: 6px 0 0;
+  color: var(--warn);
+  font-size: 12px;
+  text-align: right;
+}
+
 .grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -56,6 +71,11 @@
 }
 
 @media (max-width: 720px) {
+  .network-banner {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
   .grid {
     grid-template-columns: 1fr;
   }
@@ -151,6 +171,12 @@
   border-radius: 7px;
   border: 1px solid transparent;
   cursor: pointer;
+  min-height: 40px;
+}
+
+.btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .btn:disabled {

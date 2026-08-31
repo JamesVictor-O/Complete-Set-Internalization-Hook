@@ -68,6 +68,9 @@ contract BaseScript is Script, Deployers {
     }
 
     function getDeployer() internal returns (address) {
+        address configured = vm.envOr("DEPLOYER_ADDRESS", address(0));
+        if (configured != address(0)) return configured;
+
         address[] memory wallets = vm.getWallets();
 
         if (wallets.length > 0) {
