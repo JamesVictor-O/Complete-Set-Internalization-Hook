@@ -1,37 +1,38 @@
-/// Hand-written mirrors of on-chain struct shapes. The generated ABI JSON is imported as a loosely
-/// typed `Abi` (see `contracts.ts`), so `useReadContract` can't infer these automatically — these types
-/// keep the component code honest about what each read actually returns.
+import type { PoolKeyJson } from "./deployment";
 
-export interface SwapQuote {
-  outAmount: bigint;
-  effectivePriceWad: bigint;
-  priceImpactBps: bigint;
+export interface ExecutionQuote {
+  amount: bigint;
+  complementProceeds: bigint;
+  reserveRequired: bigint;
   available: boolean;
 }
 
 export interface QuoteResult {
-  ammQuote: SwapQuote;
-  ctfQuote: SwapQuote;
-  recommendCtf: boolean;
+  ammQuote: ExecutionQuote;
+  syntheticQuote: ExecutionQuote;
+  recommendSynthetic: boolean;
 }
 
 export interface Market {
   registered: boolean;
   frozen: boolean;
   collateralToken: string;
+  collateralCurrency: string;
   conditionId: `0x${string}`;
   yesCurrency: string;
   noCurrency: string;
+  yesPoolKey: PoolKeyJson;
+  noPoolKey: PoolKeyJson;
+  yesPoolId: `0x${string}`;
+  noPoolId: `0x${string}`;
   yesPositionId: bigint;
   noPositionId: bigint;
   yesWrapData: `0x${string}`;
   noWrapData: `0x${string}`;
-  collateralReserve: bigint;
-  outstandingSplitCost: bigint;
+  freeCollateral: bigint;
+  pendingCollateralClaims: bigint;
   yesInventory: bigint;
   noInventory: bigint;
-  yesClaimBalance: bigint;
-  noClaimBalance: bigint;
   totalShares: bigint;
   lifetimeSurplus: bigint;
 }

@@ -93,9 +93,7 @@ contract CompleteSetInternalizationHookForkTest is Test, ERC1155Holder {
         assertEq(IERC20(wrapped).balanceOf(address(this)), amount);
 
         IERC20(wrapped).approve(address(REAL_WRAPPED_1155_FACTORY), amount);
-        REAL_WRAPPED_1155_FACTORY.unwrap(
-            REAL_CONDITIONAL_TOKENS, positionId, amount, address(this), wrapData
-        );
+        REAL_WRAPPED_1155_FACTORY.unwrap(REAL_CONDITIONAL_TOKENS, positionId, amount, address(this), wrapData);
         assertEq(IERC20(wrapped).balanceOf(address(this)), 0);
         assertEq(REAL_CONDITIONAL_TOKENS.balanceOf(address(this), positionId), amount);
     }
@@ -143,9 +141,7 @@ contract CompleteSetInternalizationHookForkTest is Test, ERC1155Holder {
         assertEq(REAL_CONDITIONAL_TOKENS.payoutDenominator(conditionId), 1);
 
         uint256[] memory indexSets = CompleteSetLib.binaryPartition();
-        REAL_CONDITIONAL_TOKENS.redeemPositions(
-            IERC20(address(collateral)), bytes32(0), conditionId, indexSets
-        );
+        REAL_CONDITIONAL_TOKENS.redeemPositions(IERC20(address(collateral)), bytes32(0), conditionId, indexSets);
 
         // Both legs redeemed together: the losing (NO) leg pays 0, the winning (YES) leg pays 1:1.
         assertEq(collateral.balanceOf(address(this)), amount);

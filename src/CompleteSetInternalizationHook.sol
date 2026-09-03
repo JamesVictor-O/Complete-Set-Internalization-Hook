@@ -3,17 +3,18 @@ pragma solidity ^0.8.26;
 
 import {BaseHook} from "@openzeppelin/uniswap-hooks/src/base/BaseHook.sol";
 import {CurrencySettler} from "@openzeppelin/uniswap-hooks/src/utils/CurrencySettler.sol";
-
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {SafeCast} from "@uniswap/v4-core/src/libraries/SafeCast.sol";
-import {IPoolManager, SwapParams, ModifyLiquidityParams} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {IPoolManager, SwapParams} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {IUnlockCallback} from "@uniswap/v4-core/src/interfaces/callback/IUnlockCallback.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
-import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
-import {BeforeSwapDelta, BeforeSwapDeltaLibrary, toBeforeSwapDelta} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
-
+import {
+    BeforeSwapDelta,
+    BeforeSwapDeltaLibrary,
+    toBeforeSwapDelta
+} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
 import {IERC20} from "openzeppelin/token/ERC20/IERC20.sol";
 import {SafeERC20} from "openzeppelin/token/ERC20/utils/SafeERC20.sol";
 import {ERC1155Holder} from "openzeppelin/token/ERC1155/utils/ERC1155Holder.sol";
@@ -22,54 +23,8 @@ import {IConditionalTokens} from "./interfaces/IConditionalTokens.sol";
 import {IWrapped1155Factory} from "./interfaces/IWrapped1155Factory.sol";
 import {ICompleteSetInternalizationHook} from "./interfaces/ICompleteSetInternalizationHook.sol";
 import {CompleteSetLib} from "./libraries/CompleteSetLib.sol";
+import {CrossPoolExecutionLib} from "./libraries/CrossPoolExecutionLib.sol";
 
-/// @title CompleteSetInternalizationHook
-/// @notice Uniswap v4 hook that uses the Gnosis Conditional Tokens Framework (CTF) complete-set
-/// invariant (1 YES + 1 NO == 1 collateral) as a structural, ~1:1 backstop for a YES/NO pool.
-///
-/// INVARIANTS THIS CONTRACT MUST NEVER BREAK (see CLAUDE.md):
-///   1. `yesInventory` and `noInventory` (in complete sets) can always be merged 1:1 back to collateral.
-///   2. When the CTF path is taken, the `PoolManager`'s own delta for the swap is exactly zero — the
-///      hook fully take()s the input and settle()s the output itself.
-///   3. No user funds can be stuck or silently lost.
-///   4. Surplus only ever comes from a real `mergePositions` call whose 1:1 payout exceeds the tracked
-///      acquisition cost of what was merged — never credited out of thin air.
-///
-/// A NOTE ON WHY THE TRADER'S PAYMENT IS TAKEN AS A CLAIM, NOT REAL TOKENS:
-/// `beforeSwap` runs before the swap's router has settled anything — the router only pulls the
-/// trader's real tokens into the `PoolManager` *after* `swap()` returns, and `beforeSwap` runs strictly
-/// before that. So a hook can never hold the trader's input as real ERC-20 mid-swap; the only real
-/// tokens available inside `beforeSwap` are ones the hook (or the pool) already possessed beforehand.
-/// This hook still fully NoOps the swap (Invariant #2): the *output* leg is settled for real, funded
-/// from the hook's own pre-existing collateral reserve via a fresh CTF split, and the *input* leg is
-/// taken as an ERC-6909 claim (`take(..., claims: true)`), which is exactly as good as real tokens for
-/// `PoolManager`'s own zero-delta accounting. That claim is only converted into real, CTF-usable
-/// inventory later, via {sweepClaims} — which needs its own `PoolManager.unlock` and so cannot run
-/// inside the same `beforeSwap` call (`PoolManager` does not support nested/re-entrant unlocks).
-///
-/// MECHANISM IMPLEMENTED (defensive backstop, "mechanism A"):
-/// A pool trading YES against NO has no inherent reason to stay near 1:1 parity — nothing but the AMM
-/// curve's own liquidity resists one side being bid up arbitrarily. This hook fixes that: whenever the
-/// pool's current spot price is already at or past 1:1 parity in the direction a trade is pushing it,
-/// the hook fills the trade itself via a fresh CTF split (funded from its own collateral reserve) at
-/// exactly 1:1, instead of letting the AMM curve execute at a worse price. This structurally caps how
-/// far a single trade can move YES/NO pricing away from parity, bounding price impact the same way a
-/// $1 collateral redemption right always does for a single outcome token.
-///
-/// MECHANISM DELIBERATELY NOT IMPLEMENTED HERE ("mechanism B", surplus generation):
-/// Because mechanism A fills at exactly 1:1 with no fee, it is capital-neutral to the hook by
-/// construction (every collateral unit spent on a split is recovered by the matching merge) — it
-/// protects traders from bad pricing, but does not by itself generate LP surplus. Real surplus (Key
-/// Invariant #4) requires *opportunistically acquiring* YES and NO for a combined cost below 1
-/// collateral (e.g. buying a temporarily underpriced leg off the AMM curve) and then merging the pair.
-/// That acquisition strategy needs its own design pass (it means the hook trading into its own pool,
-/// with the re-entrancy and pricing implications that carries) and is intentionally left as a follow-up
-/// — see {mergeIfPossible} and `outstandingSplitCost`, which already account for it correctly whenever
-/// it is added: any merge that recovers more collateral than was spent acquiring the merged units is
-/// booked as surplus straight into the LP-shared reserve.
-/// @dev Inherits `ERC1155Holder` because both `ConditionalTokens.splitPosition` (minting) and
-/// `Wrapped1155Factory.unwrap` (transferring) deliver raw CTF positions to this contract via
-/// `safeTransferFrom`/`_mint`, which call `onERC1155Received`/`onERC1155BatchReceived` on the recipient.
 contract CompleteSetInternalizationHook is BaseHook, ERC1155Holder, IUnlockCallback, ICompleteSetInternalizationHook {
     using PoolIdLibrary for PoolKey;
     using CurrencyLibrary for Currency;
@@ -77,17 +32,19 @@ contract CompleteSetInternalizationHook is BaseHook, ERC1155Holder, IUnlockCallb
     using SafeCast for uint256;
     using SafeERC20 for IERC20;
 
+    uint256 public constant SAFETY_MARGIN_BPS = 30;
+    uint256 private constant BPS = 10_000;
+
     IConditionalTokens public immutable conditionalTokens;
     IWrapped1155Factory public immutable wrapped1155Factory;
 
-    mapping(PoolId => Market) internal _markets;
-    mapping(PoolId => mapping(address => uint256)) public sharesOf;
+    mapping(bytes32 => Market) private _markets;
+    mapping(PoolId => PoolBinding) private _poolBindings;
+    mapping(bytes32 => mapping(address => uint256)) public sharesOf;
 
-    constructor(IPoolManager _poolManager, IConditionalTokens _conditionalTokens, IWrapped1155Factory _wrapped1155Factory)
-        BaseHook(_poolManager)
-    {
-        conditionalTokens = _conditionalTokens;
-        wrapped1155Factory = _wrapped1155Factory;
+    constructor(IPoolManager manager, IConditionalTokens ctf, IWrapped1155Factory factory) BaseHook(manager) {
+        conditionalTokens = ctf;
+        wrapped1155Factory = factory;
     }
 
     function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
@@ -109,280 +66,383 @@ contract CompleteSetInternalizationHook is BaseHook, ERC1155Holder, IUnlockCallb
         });
     }
 
-    // ---------------------------------------------------------------------
-    // Market registration
-    // ---------------------------------------------------------------------
-
-    /// @inheritdoc ICompleteSetInternalizationHook
     function registerMarket(
-        PoolKey calldata key,
+        PoolKey calldata yesPoolKey,
+        PoolKey calldata noPoolKey,
         IERC20 collateralToken,
         bytes32 conditionId,
-        string calldata yesName,
-        string calldata yesSymbol,
-        string calldata noName,
-        string calldata noSymbol
-    ) external {
-        CompleteSetLib.registerMarket(
-            conditionalTokens,
-            wrapped1155Factory,
-            key,
-            collateralToken,
-            conditionId,
-            yesName,
-            yesSymbol,
-            noName,
-            noSymbol,
-            _markets[key.toId()]
+        string calldata,
+        string calldata,
+        string calldata,
+        string calldata
+    ) external returns (bytes32 id) {
+        if (conditionalTokens.getOutcomeSlotCount(conditionId) != 2) {
+            revert ConditionNotBinary(conditionId, conditionalTokens.getOutcomeSlotCount(conditionId));
+        }
+        if (conditionalTokens.payoutDenominator(conditionId) != 0) revert ConditionAlreadyResolved(conditionId);
+
+        id = CrossPoolExecutionLib.marketId(collateralToken, conditionId);
+        if (_markets[id].registered) revert MarketAlreadyRegistered(id);
+
+        uint256 yesPositionId = CompleteSetLib.yesPositionId(collateralToken, conditionId);
+        uint256 noPositionId = CompleteSetLib.noPositionId(collateralToken, conditionId);
+        Currency yes = Currency.wrap(wrapped1155Factory.requireWrapped1155(conditionalTokens, yesPositionId));
+        Currency no = Currency.wrap(wrapped1155Factory.requireWrapped1155(conditionalTokens, noPositionId));
+        Currency collateral = Currency.wrap(address(collateralToken));
+
+        _validatePool(yesPoolKey, collateral, yes);
+        _validatePool(noPoolKey, collateral, no);
+        PoolId yesPoolId = yesPoolKey.toId();
+        PoolId noPoolId = noPoolKey.toId();
+        if (_poolBindings[yesPoolId].registered) revert PoolAlreadyBound(yesPoolId);
+        if (_poolBindings[noPoolId].registered) revert PoolAlreadyBound(noPoolId);
+        if (PoolId.unwrap(yesPoolId) == PoolId.unwrap(noPoolId)) revert InvalidOutcomePool(yesPoolId);
+
+        Market storage market = _markets[id];
+        market.registered = true;
+        market.collateralToken = collateralToken;
+        market.collateralCurrency = collateral;
+        market.conditionId = conditionId;
+        market.yesCurrency = yes;
+        market.noCurrency = no;
+        market.yesPoolKey = yesPoolKey;
+        market.noPoolKey = noPoolKey;
+        market.yesPoolId = yesPoolId;
+        market.noPoolId = noPoolId;
+        market.yesPositionId = yesPositionId;
+        market.noPositionId = noPositionId;
+        market.yesWrapData = CompleteSetLib.encodeWrappedTokenData(address(this));
+        market.noWrapData = CompleteSetLib.encodeWrappedTokenData(address(this));
+        _poolBindings[yesPoolId] = PoolBinding(true, true, id);
+        _poolBindings[noPoolId] = PoolBinding(true, false, id);
+        collateralToken.forceApprove(address(conditionalTokens), type(uint256).max);
+
+        emit MarketRegistered(
+            id, conditionId, yesPoolId, noPoolId, address(collateralToken), Currency.unwrap(yes), Currency.unwrap(no)
         );
     }
 
-    // ---------------------------------------------------------------------
-    // LP collateral reserve (NAV = collateralReserve; shares are minted/burned pro-rata against it)
-    // ---------------------------------------------------------------------
+    function _validatePool(PoolKey calldata key, Currency collateral, Currency outcome) private view {
+        bool pair = (key.currency0 == collateral && key.currency1 == outcome)
+            || (key.currency1 == collateral && key.currency0 == outcome);
+        if (!pair || address(key.hooks) != address(this)) revert InvalidOutcomePool(key.toId());
+    }
 
-    /// @inheritdoc ICompleteSetInternalizationHook
-    function depositCollateral(PoolKey calldata key, uint256 amount) external returns (uint256 sharesMinted) {
+    function depositCollateral(bytes32 marketId, uint256 amount) external returns (uint256 sharesMinted) {
         if (amount == 0) revert ZeroAmount();
-        PoolId poolId = key.toId();
-        Market storage market = _getRegisteredMarket(poolId);
-
+        Market storage market = _market(marketId);
+        if (market.pendingCollateralClaims != 0) revert PendingSettlement();
         market.collateralToken.safeTransferFrom(msg.sender, address(this), amount);
-
-        sharesMinted = market.totalShares == 0 ? amount : (amount * market.totalShares) / market.collateralReserve;
+        sharesMinted = market.totalShares == 0 ? amount : amount * market.totalShares / market.freeCollateral;
+        market.freeCollateral += amount;
         market.totalShares += sharesMinted;
-        market.collateralReserve += amount;
-        sharesOf[poolId][msg.sender] += sharesMinted;
-
-        emit CollateralDeposited(poolId, msg.sender, amount, sharesMinted);
+        sharesOf[marketId][msg.sender] += sharesMinted;
+        emit CollateralDeposited(marketId, msg.sender, amount, sharesMinted);
     }
 
-    /// @inheritdoc ICompleteSetInternalizationHook
-    function withdrawCollateral(PoolKey calldata key, uint256 shares) external returns (uint256 amountOut) {
+    function withdrawCollateral(bytes32 marketId, uint256 shares) external returns (uint256 amountOut) {
         if (shares == 0) revert ZeroAmount();
-        PoolId poolId = key.toId();
-        Market storage market = _getRegisteredMarket(poolId);
-
-        uint256 available = sharesOf[poolId][msg.sender];
+        Market storage market = _market(marketId);
+        if (market.pendingCollateralClaims != 0 || market.yesInventory != 0 || market.noInventory != 0) {
+            revert PendingSettlement();
+        }
+        uint256 available = sharesOf[marketId][msg.sender];
         if (shares > available) revert InsufficientShares(shares, available);
-
-        amountOut = (shares * market.collateralReserve) / market.totalShares;
-
-        sharesOf[poolId][msg.sender] = available - shares;
+        amountOut = shares * market.freeCollateral / market.totalShares;
+        sharesOf[marketId][msg.sender] = available - shares;
         market.totalShares -= shares;
-        market.collateralReserve -= amountOut;
-
+        market.freeCollateral -= amountOut;
         market.collateralToken.safeTransfer(msg.sender, amountOut);
-
-        emit CollateralWithdrawn(poolId, msg.sender, amountOut, shares);
+        emit CollateralWithdrawn(marketId, msg.sender, amountOut, shares);
     }
-
-    // ---------------------------------------------------------------------
-    // Swap routing
-    // ---------------------------------------------------------------------
 
     function _beforeSwap(address sender, PoolKey calldata key, SwapParams calldata params, bytes calldata)
         internal
         override
         returns (bytes4, BeforeSwapDelta, uint24)
     {
-        PoolId poolId = key.toId();
-        Market storage market = _markets[poolId];
-        if (!market.registered) revert MarketNotRegistered(poolId);
-        if (market.frozen) revert MarketFrozen(poolId);
+        PoolId targetPoolId = key.toId();
+        PoolBinding memory binding = _poolBindings[targetPoolId];
+        if (!binding.registered) revert MarketNotRegistered(bytes32(PoolId.unwrap(targetPoolId)));
+        Market storage market = _markets[binding.marketId];
+        if (market.frozen) return _noRoute();
 
-        // Only a fully NoOp fill is safe to hand back as a pure BeforeSwapDelta here, so a partially
-        // filled complete-set trade is never attempted — it is all-AMM or all-CTF for a given swap, for
-        // both exact-input and exact-output.
         bool exactInput = params.amountSpecified < 0;
         uint256 amount = exactInput ? uint256(-params.amountSpecified) : uint256(params.amountSpecified);
-        if (amount == 0) return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
-
-        if (!CompleteSetLib.priceIsAtOrPastParity(poolManager, poolId, params.zeroForOne, amount, exactInput)) {
-            return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
+        Currency pay = params.zeroForOne ? key.currency0 : key.currency1;
+        Currency receiveCurrency = params.zeroForOne ? key.currency1 : key.currency0;
+        Currency target = binding.isYes ? market.yesCurrency : market.noCurrency;
+        if (exactInput) {
+            if (!(pay == market.collateralCurrency) || !(receiveCurrency == target)) return _noRoute();
+            (bool useSynthetic,, uint256 complementProceeds) =
+                _quoteExactInput(market, binding.isYes, amount, params.zeroForOne);
+            if (!useSynthetic || market.freeCollateral < amount) return _noRoute();
+            uint256 realized = CrossPoolExecutionLib.splitAndExecuteSynthetic(
+                conditionalTokens, wrapped1155Factory, poolManager, market, binding.isYes, amount, complementProceeds
+            );
+            uint256 netCost = amount - realized;
+            market.collateralCurrency.take(poolManager, address(this), netCost, true);
+            market.pendingCollateralClaims += netCost;
+            emit SyntheticFill(binding.marketId, targetPoolId, sender, true, amount, realized, netCost);
+            return (BaseHook.beforeSwap.selector, toBeforeSwapDelta(netCost.toInt128(), -amount.toInt128()), 0);
         }
-        if (market.collateralReserve < amount) {
-            // Structural backstop unavailable this trade (reserve exhausted) — fall back to the AMM.
-            return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
-        }
 
-        (Currency payCurrency, Currency receiveCurrency) =
-            params.zeroForOne ? (key.currency0, key.currency1) : (key.currency1, key.currency0);
-
-        CompleteSetLib.fillFromCompleteSet(
-            conditionalTokens, wrapped1155Factory, poolManager, market, payCurrency, receiveCurrency, amount
+        if (!(pay == market.collateralCurrency) || !(receiveCurrency == target)) return _noRoute();
+        (bool useSyntheticOutput,, uint256 outputComplementProceeds) =
+            _quoteExactOutput(market, binding.isYes, amount, params.zeroForOne);
+        if (!useSyntheticOutput || market.freeCollateral < amount) return _noRoute();
+        uint256 outputRealized = CrossPoolExecutionLib.splitAndExecuteSynthetic(
+            conditionalTokens, wrapped1155Factory, poolManager, market, binding.isYes, amount, outputComplementProceeds
         );
-
-        emit CompleteSetFilled(poolId, sender, params.zeroForOne, amount);
-
-        // Whichever currency the trader *pays* always needs hookDelta = +amount, and whichever they
-        // *receive* always needs hookDelta = -amount (see Hooks.sol's beforeSwap/afterSwap accounting) —
-        // for exact-input the "specified" currency is the pay leg, for exact-output it's the receive
-        // leg, so the two cases are exact negations of each other.
-        BeforeSwapDelta returnDelta = exactInput
-            ? toBeforeSwapDelta(amount.toInt128(), -amount.toInt128())
-            : toBeforeSwapDelta(-amount.toInt128(), amount.toInt128());
-        return (BaseHook.beforeSwap.selector, returnDelta, 0);
+        uint256 outputNetCost = amount - outputRealized;
+        market.collateralCurrency.take(poolManager, address(this), outputNetCost, true);
+        market.pendingCollateralClaims += outputNetCost;
+        emit SyntheticFill(binding.marketId, targetPoolId, sender, false, amount, outputRealized, outputNetCost);
+        return (BaseHook.beforeSwap.selector, toBeforeSwapDelta(-amount.toInt128(), outputNetCost.toInt128()), 0);
     }
 
-    // ---------------------------------------------------------------------
-    // Inventory recycling
-    // ---------------------------------------------------------------------
+    function _quoteExactInput(Market storage market, bool targetYes, uint256 amount, bool targetZeroForOne)
+        private
+        view
+        returns (bool useSynthetic, uint256 ammOut, uint256 complementProceeds)
+    {
+        PoolKey memory targetKey = targetYes ? market.yesPoolKey : market.noPoolKey;
+        PoolKey memory complementKey = targetYes ? market.noPoolKey : market.yesPoolKey;
+        Currency complement = targetYes ? market.noCurrency : market.yesCurrency;
+        CrossPoolExecutionLib.Quote memory amm =
+            CrossPoolExecutionLib.quoteExactInput(poolManager, targetKey, targetZeroForOne, amount);
+        bool complementZeroForOne = complementKey.currency0 == complement;
+        CrossPoolExecutionLib.Quote memory sale =
+            CrossPoolExecutionLib.quoteExactInput(poolManager, complementKey, complementZeroForOne, amount);
+        if (!amm.available || !sale.available || sale.amount >= amount) return (false, amm.amount, sale.amount);
+        CrossPoolExecutionLib.Quote memory recycled =
+            CrossPoolExecutionLib.quoteExactInput(poolManager, targetKey, targetZeroForOne, sale.amount);
+        if (!recycled.available) return (false, amm.amount, sale.amount);
+        uint256 syntheticOut = amount + recycled.amount;
+        useSynthetic = syntheticOut * BPS >= amm.amount * (BPS + SAFETY_MARGIN_BPS);
+        return (useSynthetic, amm.amount, sale.amount);
+    }
 
-    /// @dev Tags the payload `unlockCallback` receives, since both {sweepClaims} and
-    /// {harvestOpportunisticSurplus} need their own `PoolManager.unlock` (nested unlocks are not
-    /// supported, so each must run in its own top-level call) and route through the same callback.
+    function _quoteExactOutput(Market storage market, bool targetYes, uint256 amount, bool targetZeroForOne)
+        private
+        view
+        returns (bool useSynthetic, uint256 ammCost, uint256 complementProceeds)
+    {
+        PoolKey memory targetKey = targetYes ? market.yesPoolKey : market.noPoolKey;
+        PoolKey memory complementKey = targetYes ? market.noPoolKey : market.yesPoolKey;
+        Currency complement = targetYes ? market.noCurrency : market.yesCurrency;
+        CrossPoolExecutionLib.Quote memory amm =
+            CrossPoolExecutionLib.quoteExactOutput(poolManager, targetKey, targetZeroForOne, amount);
+        bool complementZeroForOne = complementKey.currency0 == complement;
+        CrossPoolExecutionLib.Quote memory sale =
+            CrossPoolExecutionLib.quoteExactInput(poolManager, complementKey, complementZeroForOne, amount);
+        if (!amm.available || !sale.available || sale.amount >= amount) return (false, amm.amount, sale.amount);
+        uint256 syntheticCost = amount - sale.amount;
+        useSynthetic = syntheticCost * (BPS + SAFETY_MARGIN_BPS) <= amm.amount * BPS;
+        return (useSynthetic, amm.amount, sale.amount);
+    }
+
+    function _noRoute() private pure returns (bytes4, BeforeSwapDelta, uint24) {
+        return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
+    }
+
     enum UnlockAction {
         Sweep,
-        Harvest
+        SplitArbitrage,
+        MergeArbitrage
     }
 
-    /// @inheritdoc ICompleteSetInternalizationHook
-    function sweepClaims(PoolKey calldata key) external returns (uint256 yesSwept, uint256 noSwept) {
-        PoolId poolId = key.toId();
-        _getRegisteredMarket(poolId); // reverts if unregistered
-        bytes memory result = poolManager.unlock(abi.encode(UnlockAction.Sweep, abi.encode(poolId)));
-        (yesSwept, noSwept) = abi.decode(result, (uint256, uint256));
+    function sweepCollateralClaims(bytes32 marketId) external returns (uint256 amountSwept) {
+        _market(marketId);
+        amountSwept = abi.decode(poolManager.unlock(abi.encode(UnlockAction.Sweep, abi.encode(marketId))), (uint256));
     }
 
-    /// @inheritdoc ICompleteSetInternalizationHook
-    function harvestOpportunisticSurplus(PoolKey calldata key, uint256 amountIn, uint256 minAmountOut)
-        external
-        returns (uint256 amountMerged, uint256 surplus)
-    {
-        PoolId poolId = key.toId();
-        Market storage market = _getRegisteredMarket(poolId);
-        if (market.frozen) revert MarketFrozen(poolId);
-        if (amountIn == 0) revert ZeroAmount();
-
-        // Only ever trade the market's currently idle (unmatched) inventory — the matched, mergeable
-        // portion (and `collateralReserve`) is never touched, so the mergeable amount can only stay the
-        // same or grow from this call, never shrink. See {ICompleteSetInternalizationHook-harvestOpportunisticSurplus}.
-        bool sellYes = market.yesInventory > market.noInventory;
-        uint256 idle = sellYes ? market.yesInventory - market.noInventory : market.noInventory - market.yesInventory;
-        if (amountIn > idle) revert InsufficientIdleInventory(amountIn, idle);
-
-        bytes memory result =
-            poolManager.unlock(abi.encode(UnlockAction.Harvest, abi.encode(key, sellYes, amountIn, minAmountOut)));
-        (amountMerged, surplus) = abi.decode(result, (uint256, uint256));
-    }
-
-    /// @dev `PoolManager` callback for {sweepClaims} and {harvestOpportunisticSurplus}. Only reachable
-    /// via `poolManager.unlock`, which only this contract ever calls, always with one of the two
-    /// `UnlockAction`-tagged payloads built above, so `data` is trusted to decode accordingly.
     function unlockCallback(bytes calldata data) external onlyPoolManager returns (bytes memory) {
         (UnlockAction action, bytes memory payload) = abi.decode(data, (UnlockAction, bytes));
-        if (action == UnlockAction.Sweep) {
-            return _handleSweep(abi.decode(payload, (PoolId)));
+        if (action == UnlockAction.SplitArbitrage) {
+            (bytes32 id, uint256 arbAmount, uint256 yesMin, uint256 noMin, uint256 required) =
+                abi.decode(payload, (bytes32, uint256, uint256, uint256, uint256));
+            return abi.encode(_executeSplit(id, arbAmount, yesMin, noMin, required));
         }
-        (PoolKey memory key, bool sellYes, uint256 amountIn, uint256 minAmountOut) =
-            abi.decode(payload, (PoolKey, bool, uint256, uint256));
-        return _handleHarvest(key, sellYes, amountIn, minAmountOut);
+        if (action == UnlockAction.MergeArbitrage) {
+            (bytes32 id, uint256 arbAmount, uint256 yesMax, uint256 noMax, uint256 required) =
+                abi.decode(payload, (bytes32, uint256, uint256, uint256, uint256));
+            return abi.encode(_executeMerge(id, arbAmount, yesMax, noMax, required));
+        }
+        bytes32 marketId = abi.decode(payload, (bytes32));
+        Market storage market = _market(marketId);
+        uint256 amount = market.pendingCollateralClaims;
+        if (amount != 0) {
+            market.collateralCurrency.settle(poolManager, address(this), amount, true);
+            market.collateralCurrency.take(poolManager, address(this), amount, false);
+            market.pendingCollateralClaims = 0;
+            market.freeCollateral += amount;
+            emit CollateralClaimsSwept(marketId, amount);
+        }
+        return abi.encode(amount);
     }
 
-    function _handleSweep(PoolId poolId) private returns (bytes memory) {
-        Market storage market = _markets[poolId];
-
-        uint256 yesSwept = CompleteSetLib.sweepLeg(
-            conditionalTokens, wrapped1155Factory, poolManager, market.yesCurrency, market.yesPositionId, market.yesWrapData, market.yesClaimBalance
-        );
-        market.yesClaimBalance = 0;
-        market.yesInventory += yesSwept;
-
-        uint256 noSwept = CompleteSetLib.sweepLeg(
-            conditionalTokens, wrapped1155Factory, poolManager, market.noCurrency, market.noPositionId, market.noWrapData, market.noClaimBalance
-        );
-        market.noClaimBalance = 0;
-        market.noInventory += noSwept;
-
-        if (yesSwept > 0 || noSwept > 0) emit ClaimsSwept(poolId, yesSwept, noSwept);
-        return abi.encode(yesSwept, noSwept);
-    }
-
-    /// @dev Sells `amountIn` of the market's idle `sellYes ? YES : NO` leg directly against this pool's
-    /// own AMM curve for the other leg (via {CompleteSetLib-sellIdleLegOnCurve}), then merges. Calling
-    /// `poolManager.swap` directly (not via a router) makes this hook the swap's own `msg.sender`, which
-    /// `Hooks.beforeSwap`/`afterSwap` special-case to skip invoking the hook entirely — so this executes
-    /// as a plain AMM-curve trade and does not re-trigger mechanism A's CTF backstop on itself.
-    function _handleHarvest(PoolKey memory key, bool sellYes, uint256 amountIn, uint256 minAmountOut)
-        private
-        returns (bytes memory)
+    function executeSplitArbitrage(bytes32 marketId, uint256 amount, uint256 minSurplus)
+        external
+        returns (uint256 surplus)
     {
-        PoolId poolId = key.toId();
-        Market storage market = _markets[poolId];
-
-        uint256 amountOut = CompleteSetLib.sellIdleLegOnCurve(
-            conditionalTokens, wrapped1155Factory, poolManager, key, market, sellYes, amountIn, minAmountOut
+        if (amount == 0) revert ZeroAmount();
+        Market storage market = _market(marketId);
+        if (market.frozen) revert MarketFrozenError(marketId);
+        if (market.pendingCollateralClaims != 0) revert PendingSettlement();
+        if (market.freeCollateral < amount) revert InsufficientFreeCollateral(amount, market.freeCollateral);
+        CrossPoolExecutionLib.Quote memory yesQuote = CrossPoolExecutionLib.quoteExactInput(
+            poolManager, market.yesPoolKey, market.yesPoolKey.currency0 == market.yesCurrency, amount
         );
-
-        if (sellYes) {
-            market.yesInventory -= amountIn;
-            market.noInventory += amountOut;
-        } else {
-            market.noInventory -= amountIn;
-            market.yesInventory += amountOut;
+        CrossPoolExecutionLib.Quote memory noQuote = CrossPoolExecutionLib.quoteExactInput(
+            poolManager, market.noPoolKey, market.noPoolKey.currency0 == market.noCurrency, amount
+        );
+        uint256 required = _requiredSurplus(amount, minSurplus);
+        if (!yesQuote.available || !noQuote.available || yesQuote.amount + noQuote.amount < amount + required) {
+            revert InsufficientEdge(yesQuote.amount + noQuote.amount, amount + required);
         }
-        emit OpportunisticSwap(poolId, sellYes, amountIn, amountOut);
-
-        (uint256 amountMerged, uint256 surplus) = CompleteSetLib.mergeIfPossible(conditionalTokens, poolId, market);
-        return abi.encode(amountMerged, surplus);
+        surplus = abi.decode(
+            poolManager.unlock(
+                abi.encode(
+                    UnlockAction.SplitArbitrage, abi.encode(marketId, amount, yesQuote.amount, noQuote.amount, required)
+                )
+            ),
+            (uint256)
+        );
     }
 
-    /// @inheritdoc ICompleteSetInternalizationHook
-    function mergeIfPossible(PoolKey calldata key) external returns (uint256 amountMerged, uint256 surplus) {
-        PoolId poolId = key.toId();
-        Market storage market = _getRegisteredMarket(poolId);
-        if (market.yesClaimBalance > 0 || market.noClaimBalance > 0) {
-            poolManager.unlock(abi.encode(UnlockAction.Sweep, abi.encode(poolId)));
-        }
-        return CompleteSetLib.mergeIfPossible(conditionalTokens, poolId, market);
+    function executeMergeArbitrage(bytes32 marketId, uint256 amount, uint256 maxCost, uint256 minSurplus)
+        external
+        returns (uint256 surplus)
+    {
+        if (amount == 0) revert ZeroAmount();
+        Market storage market = _market(marketId);
+        if (market.frozen) revert MarketFrozenError(marketId);
+        if (market.pendingCollateralClaims != 0) revert PendingSettlement();
+        bool yesZeroForOne = market.yesPoolKey.currency0 == market.collateralCurrency;
+        bool noZeroForOne = market.noPoolKey.currency0 == market.collateralCurrency;
+        CrossPoolExecutionLib.Quote memory yesQuote =
+            CrossPoolExecutionLib.quoteExactOutput(poolManager, market.yesPoolKey, yesZeroForOne, amount);
+        CrossPoolExecutionLib.Quote memory noQuote =
+            CrossPoolExecutionLib.quoteExactOutput(poolManager, market.noPoolKey, noZeroForOne, amount);
+        uint256 totalCost = yesQuote.amount + noQuote.amount;
+        uint256 required = _requiredSurplus(amount, minSurplus);
+        if (
+            !yesQuote.available || !noQuote.available || totalCost > maxCost || totalCost + required > amount
+                || market.freeCollateral < totalCost
+        ) revert InsufficientEdge(amount, totalCost + required);
+        surplus = abi.decode(
+            poolManager.unlock(
+                abi.encode(
+                    UnlockAction.MergeArbitrage, abi.encode(marketId, amount, yesQuote.amount, noQuote.amount, required)
+                )
+            ),
+            (uint256)
+        );
     }
 
-    // ---------------------------------------------------------------------
-    // Resolution
-    // ---------------------------------------------------------------------
+    function _executeSplit(bytes32 marketId, uint256 amount, uint256 yesMin, uint256 noMin, uint256 required)
+        private
+        returns (uint256 surplus)
+    {
+        Market storage market = _markets[marketId];
+        market.freeCollateral -= amount;
+        conditionalTokens.splitPosition(
+            market.collateralToken, bytes32(0), market.conditionId, CompleteSetLib.binaryPartition(), amount
+        );
+        CrossPoolExecutionLib.wrapPosition(
+            conditionalTokens, wrapped1155Factory, market.yesPositionId, market.yesWrapData, amount
+        );
+        CrossPoolExecutionLib.wrapPosition(
+            conditionalTokens, wrapped1155Factory, market.noPositionId, market.noWrapData, amount
+        );
+        uint256 yesProceeds = CrossPoolExecutionLib.sellExactInput(
+            poolManager, market.yesPoolKey, market.yesCurrency, market.collateralCurrency, amount, yesMin
+        );
+        uint256 noProceeds = CrossPoolExecutionLib.sellExactInput(
+            poolManager, market.noPoolKey, market.noCurrency, market.collateralCurrency, amount, noMin
+        );
+        uint256 proceeds = yesProceeds + noProceeds;
+        surplus = proceeds - amount;
+        if (surplus < required) revert InsufficientEdge(surplus, required);
+        market.freeCollateral += proceeds;
+        market.lifetimeSurplus += surplus;
+        emit SplitArbitrage(marketId, amount, proceeds, surplus);
+    }
 
-    /// @inheritdoc ICompleteSetInternalizationHook
-    function freezeForResolution(PoolKey calldata key) external {
-        PoolId poolId = key.toId();
-        Market storage market = _getRegisteredMarket(poolId);
+    function _executeMerge(bytes32 marketId, uint256 amount, uint256 yesMax, uint256 noMax, uint256 required)
+        private
+        returns (uint256 surplus)
+    {
+        Market storage market = _markets[marketId];
+        uint256 yesCost = CrossPoolExecutionLib.buyExactOutput(
+            poolManager, market.yesPoolKey, market.yesCurrency, market.collateralCurrency, amount, yesMax
+        );
+        uint256 noCost = CrossPoolExecutionLib.buyExactOutput(
+            poolManager, market.noPoolKey, market.noCurrency, market.collateralCurrency, amount, noMax
+        );
+        uint256 cost = yesCost + noCost;
+        CrossPoolExecutionLib.unwrapPosition(
+            conditionalTokens, wrapped1155Factory, market.yesPositionId, market.yesWrapData, amount
+        );
+        CrossPoolExecutionLib.unwrapPosition(
+            conditionalTokens, wrapped1155Factory, market.noPositionId, market.noWrapData, amount
+        );
+        uint256 beforeBalance = market.collateralToken.balanceOf(address(this));
+        conditionalTokens.mergePositions(
+            market.collateralToken, bytes32(0), market.conditionId, CompleteSetLib.binaryPartition(), amount
+        );
+        uint256 recovered = market.collateralToken.balanceOf(address(this)) - beforeBalance;
+        surplus = recovered - cost;
+        if (surplus < required) revert InsufficientEdge(surplus, required);
+        market.freeCollateral = market.freeCollateral - cost + recovered;
+        market.lifetimeSurplus += surplus;
+        emit MergeArbitrage(marketId, amount, cost, surplus);
+    }
+
+    function _requiredSurplus(uint256 amount, uint256 callerMinimum) private pure returns (uint256) {
+        uint256 protocolMinimum = amount * SAFETY_MARGIN_BPS / BPS;
+        return callerMinimum > protocolMinimum ? callerMinimum : protocolMinimum;
+    }
+
+    function freezeForResolution(bytes32 marketId) external {
+        Market storage market = _market(marketId);
         if (conditionalTokens.payoutDenominator(market.conditionId) == 0) {
             revert ConditionNotYetResolved(market.conditionId);
         }
         market.frozen = true;
-        emit MarketFrozenForResolution(poolId);
+        emit MarketFrozen(marketId);
     }
 
-    /// @inheritdoc ICompleteSetInternalizationHook
-    function redeemAfterResolution(PoolKey calldata key) external returns (uint256 collateralReceived) {
-        PoolId poolId = key.toId();
-        Market storage market = _getRegisteredMarket(poolId);
-        if (!market.frozen) revert MarketFrozen(poolId);
-
-        uint256 balanceBefore = market.collateralToken.balanceOf(address(this));
+    function redeemAfterResolution(bytes32 marketId) external returns (uint256 collateralReceived) {
+        Market storage market = _market(marketId);
+        if (!market.frozen) revert MarketFrozenError(marketId);
+        uint256 beforeBalance = market.collateralToken.balanceOf(address(this));
         conditionalTokens.redeemPositions(
             market.collateralToken, bytes32(0), market.conditionId, CompleteSetLib.binaryPartition()
         );
-        collateralReceived = market.collateralToken.balanceOf(address(this)) - balanceBefore;
-
+        collateralReceived = market.collateralToken.balanceOf(address(this)) - beforeBalance;
         market.yesInventory = 0;
         market.noInventory = 0;
-        market.collateralReserve += collateralReceived;
-
-        emit MarketRedeemed(poolId, collateralReceived);
+        market.freeCollateral += collateralReceived;
+        emit MarketRedeemed(marketId, collateralReceived);
     }
 
-    // ---------------------------------------------------------------------
-    // Views
-    // ---------------------------------------------------------------------
-
-    /// @inheritdoc ICompleteSetInternalizationHook
-    function getMarket(PoolId poolId) external view returns (Market memory) {
-        return _markets[poolId];
+    function getMarket(bytes32 marketId) external view returns (Market memory) {
+        return _markets[marketId];
     }
 
-    function _getRegisteredMarket(PoolId poolId) private view returns (Market storage market) {
-        market = _markets[poolId];
-        if (!market.registered) revert MarketNotRegistered(poolId);
+    function getMarketForPool(PoolId poolId) external view returns (Market memory market, PoolBinding memory binding) {
+        binding = _poolBindings[poolId];
+        market = _markets[binding.marketId];
+    }
+
+    function poolBinding(PoolId poolId) external view returns (PoolBinding memory) {
+        return _poolBindings[poolId];
+    }
+
+    function _market(bytes32 marketId) private view returns (Market storage market) {
+        market = _markets[marketId];
+        if (!market.registered) revert MarketNotRegistered(marketId);
     }
 }

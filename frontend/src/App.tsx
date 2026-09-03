@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useAccount } from "wagmi";
 import { useDeployment } from "./hooks/useDeployment";
 import { useAppWallet } from "./hooks/useAppWallet";
@@ -15,14 +15,16 @@ function App() {
   const { data: deployment, isLoading, error } = useDeployment();
   const { chainId, isConnected } = useAccount();
   const { switchNetwork, isSwitchingNetwork } = useAppWallet();
-  const poolId = useMemo(() => (deployment ? computePoolId(deployment.poolKey) : undefined), [deployment]);
+  const [selectedOutcome, setSelectedOutcome] = useState<"YES" | "NO">("YES");
+  const poolKey = deployment ? (selectedOutcome === "YES" ? deployment.yesPoolKey : deployment.noPoolKey) : undefined;
+  const poolId = useMemo(() => (poolKey ? computePoolId(poolKey) : undefined), [poolKey]);
 
   return (
     <div className="app">
       <header className="app-header">
         <div>
           <h1>Complete-Set Internalization Hook</h1>
-          <p className="subtle">CTF complete-set backstop for a YES/NO Uniswap v4 pool</p>
+          <p className="subtle">Executable complete-set liquidity across YES/dUSD and NO/dUSD Uniswap v4 pools</p>
         </div>
         <WalletBar demoTrader={deployment?.demoTrader} />
       </header>
@@ -59,13 +61,19 @@ function App() {
         </p>
       )}
 
-      {deployment && poolId && (
-        <main className="grid">
-          <MarketPanel deployment={deployment} poolId={poolId} />
-          <SwapPanel deployment={deployment} />
-          <LiquidityPanel deployment={deployment} poolId={poolId} />
-          <MergePanel deployment={deployment} />
-        </main>
+      {deployment && poolId && poolKey && (
+        <>
+          <div className="button-row" aria-label="Select outcome market">
+            <button className={selectedOutcome === "YES" ? "btn btn-primary" : "btn btn-ghost"} onClick={() => setSelectedOutcome("YES")}>YES / dUSD</button>
+            <button className={selectedOutcome === "NO" ? "btn btn-primary" : "btn btn-ghost"} onClick={() => setSelectedOutcome("NO")}>NO / dUSD</button>
+          </div>
+          <main className="grid">
+            <MarketPanel deployment={deployment} poolId={poolId} poolKey={poolKey} />
+            <SwapPanel deployment={deployment} poolKey={poolKey} outcome={selectedOutcome} />
+            <LiquidityPanel deployment={deployment} />
+            <MergePanel deployment={deployment} />
+          </main>
+        </>
       )}
     </div>
   );

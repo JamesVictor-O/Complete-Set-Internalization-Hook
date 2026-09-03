@@ -4,356 +4,228 @@
 
 Built for the Atrium Uniswap Hook Incubator Hookathon, Sustainable Liquidity & MEV Protection track.
 
-[**Inspect the live hook**](https://sepolia.uniscan.xyz/address/0xc88B0aC546a99B586199dDBeE30D801Ee1d80088) · [**Verify the deployment transaction**](https://sepolia.uniscan.xyz/tx/0x1a9052149599281a934f1df96205a5d3ed9eb10aec14b2a135a83d5b71130623) · [**Run the judge walkthrough**](#judge-walkthrough)
+## 30-second version
 
-## The 30-second version
+A binary CTF condition produces a complete set:
 
-A binary prediction market mints YES and NO in complete sets. One collateral token always splits into one YES and one NO, and those two tokens always merge back into one collateral token.
+```text
+1 dUSD ↔ 1 YES + 1 NO
+```
 
-A normal automated market maker (AMM) does not enforce that relationship during a YES/NO swap. A large trade can therefore cross parity and receive a worse execution price even though the Conditional Tokens Framework (CTF) can create the required inventory at exactly 1:1.
+That does **not** mean `YES = NO`, and it does not assign either outcome a fixed price. This project gives one condition two collateral-denominated Uniswap v4 pools—YES/dUSD and NO/dUSD—then compares normal AMM execution with an atomic complete-set route.
 
-This hook compares the requested trade with that structural price. When the pool is at parity, past parity, or the trade would cross parity, the hook:
-
-1. Splits collateral from its liquidity-provider reserve into YES and NO
-2. Gives the trader the requested outcome token at 1:1
-3. Retains the opposite token for a later matching trade or merge
-4. Returns a `BeforeSwapDelta` that fully accounts for the trade without moving the AMM curve
-
-If the reserve cannot cover the trade, the hook leaves execution to the normal Uniswap v4 pool.
-
-## Why this matters
-
-Prediction markets have a source of liquidity that ordinary AMMs cannot see: complete-set convertibility.
-
-Without this hook, the pool relies only on deposited YES/NO inventory. Thin liquidity increases price impact and exposes traders to execution beyond the market's structural parity point. With the hook, collateral reserves become outcome-token liquidity exactly when the AMM would quote a worse result.
-
-The mechanism improves sustainable liquidity without fabricating yield:
-
-- **Traders**: receive a hard 1:1 backstop when the complete-set route applies
-- **Liquidity providers**: fund a share-based collateral reserve recoverable through complete-set merges
-- **The AMM**: handles trades normally when its curve offers the appropriate route
-- **Prediction markets**: gain liquidity from their settlement primitive instead of relying only on paired token deposits
+To buy YES synthetically, the hook splits dUSD, delivers YES, sells the newly created NO into the NO/dUSD pool, and charges only the net collateral cost. NO purchases work symmetrically. The hook selects this route only when its executable result beats the direct AMM by a safety margin.
 
 ## Core insight
 
-The hook treats complete-set conversion as a second execution venue inside the Uniswap v4 swap lifecycle.
+At market prices `YES = 0.70 dUSD` and `NO = 0.30 dUSD`:
 
 ```text
-Normal YES/NO pool
+1.00 dUSD -> split -> 1 YES + 1 NO
+                         |
+                         +-- sell NO for about 0.30 dUSD
 
-Trader swap -> Uniswap curve -> price impact grows with trade size
-
-Hooked YES/NO pool
-
-                         +-> Uniswap curve, when it remains the valid route
-Trader swap -> compare --|
-                         +-> CTF split at 1:1, when parity is reached or crossed
+effective YES cost = 1.00 - 0.30 = about 0.70 dUSD
 ```
 
-This is not an oracle-based peg and it does not overwrite the pool price. The hook projects the requested trade against active tick liquidity and selects the complete-set route only when the trade reaches the structural parity boundary.
+The complementary pool supplies the synthetic price. The hook does not constrain the relative YES/NO price or assign either outcome a fixed one-dollar quote. Prices such as 80/20, 95/5, and 1/99 are legitimate.
 
-## What makes the hook different
-
-The project combines four properties that are usually implemented separately:
-
-- **Trade-impact-aware routing**: checks where the requested trade would move the pool, not only its current spot price
-- **Return-delta execution**: accounts for the complete trade through `beforeSwapReturnDelta`, leaving the PoolManager's AMM delta at zero
-- **Recoverable reserve accounting**: collateral deposits mint proportional shares, while matched YES/NO inventory merges back into collateral
-- **No-loss surplus harvesting**: idle outcome inventory can trade against the pool and merge only when an on-chain minimum-output floor protects reserve capital
-
-The hook uses only `beforeSwap` and `beforeSwapReturnDelta`. It does not add dynamic fees, an oracle, an off-chain keeper, or an upgradeable proxy.
-
-## System flow
+## Architecture
 
 ```mermaid
-flowchart LR
-    T[Trader requests YES/NO swap] --> Q{Parity check}
-    Q -->|Trade stays before parity| A[Uniswap v4 AMM executes]
-    Q -->|At, past, or crosses parity| R{Reserve covers fill?}
-    R -->|No| A
-    R -->|Yes| S[Split collateral through CTF]
-    S --> O[Send requested outcome token]
-    S --> I[Retain opposite outcome token]
-    O --> D[Return full BeforeSwapDelta]
-    I --> M{Matching inventory available?}
-    M -->|Yes| C[Merge complete set to collateral]
-    M -->|No| H[Hold inventory or harvest above floor]
-    C --> V[Restore LP reserve]
-    H --> V
+flowchart TB
+    C[1 dUSD] <--> S[CTF split / merge]
+    S <--> SET[1 YES + 1 NO]
+    SET --> Y[YES / dUSD pool]
+    SET --> N[NO / dUSD pool]
+    Y --> H[Complete-Set Hook]
+    N --> H
+    H --> A[Direct AMM executable quote]
+    H --> X[CTF + complementary-pool executable quote]
+    A --> B{Best execution after fees and 30 bps safety margin}
+    X --> B
+    B --> D[Normal AMM]
+    B --> E[Atomic complete-set route]
 ```
 
-### Swap decision
+One condition-level `Market` stores both `yesPoolId` and `noPoolId`. Each pool has a binding back to that market and an `isYes` flag. Registration derives both wrapped outcome addresses from the same collateral and CTF condition, validates both collateral/outcome pool keys, and prevents either pool from being rebound.
 
-The complete-set path runs in [`_beforeSwap`](src/CompleteSetInternalizationHook.sol#L184):
+### Why two pools
 
-1. Reject unregistered or frozen markets
-2. Normalize exact-input and exact-output amounts
-3. Project the trade against the pool's active tick liquidity
-4. Continue through the AMM if the trade does not reach parity
-5. Continue through the AMM if the collateral reserve cannot cover the fill
-6. Otherwise split collateral, settle the trader at 1:1, retain the opposite leg, and absorb the swap through return delta
+We evaluated a single YES/dUSD pool with a fully synthetic NO side. That model concentrates liquidity, but it makes one outcome indirect, complicates execution UX, and pushes more routing responsibility outside a v4 pool invocation.
 
-### Reserve lifecycle
+Two pools are the better hackathon architecture because both outcomes have direct price discovery, ordinary swaps remain understandable, and the complete-set comparison is symmetric. The cost is real liquidity fragmentation: CTF couples the economics, not the Uniswap liquidity positions. A thin complementary pool therefore makes the synthetic route unavailable or less reliable; the frontend reports that state rather than inventing a price.
 
-Liquidity providers deposit collateral through [`depositCollateral`](src/CompleteSetInternalizationHook.sol#L145) and receive proportional reserve shares. They withdraw through [`withdrawCollateral`](src/CompleteSetInternalizationHook.sol#L161).
+## Swap decision
 
-As opposite trade flow accumulates matching YES and NO inventory, [`mergeIfPossible`](src/libraries/CompleteSetLib.sol#L287) converts complete sets back into collateral. Any recorded surplus must come from collateral actually recovered by that merge.
+For an exact-input dUSD purchase of YES:
 
-### Opportunistic surplus
+1. Quote the direct YES/dUSD AMM output for the requested input.
+2. Quote selling the same number of newly split NO tokens into NO/dUSD.
+3. Quote recycling those dUSD proceeds through YES/dUSD.
+4. Compare total synthetic output with direct output after the 30 bps safety margin.
+5. If synthetic wins, atomically split, sell NO, deliver YES, and leave only the recycled portion for the outer YES pool swap.
 
-Asymmetric order flow can leave idle YES or NO inventory. [`harvestOpportunisticSurplus`](src/CompleteSetInternalizationHook.sol#L249) sells only the unmatched portion against the pool, then merges the acquired opposite leg.
+For exact output, the comparison is:
 
-The caller supplies `minAmountOut`, and the hook enforces an additional break-even floor. An unprofitable harvest reverts instead of reducing reserve capital.
+```text
+direct AMM cost(YES, x)
 
-## Verification at a glance
+versus
 
-Every headline claim has a reproducible check:
+synthetic net cost = x dUSD - executable NO proceeds(x)
+```
 
-| Evidence | Current result | How to verify |
-|---|---:|---|
-| Offline Foundry suite | 40 tests passing | `forge test --offline --no-match-path "test/fork/**"` |
-| Live Gnosis fork suite | 4 integration tests | `forge test --match-contract CompleteSetInternalizationHookForkTest` |
-| Total test count | 44 tests | Review [`test/`](test) |
-| Hook permission surface | 2 flags | Run `test_getHookPermissions_onlyBeforeSwapAndReturnDelta` |
-| Unichain Sepolia deployment | Live | Inspect the [hook contract](https://sepolia.uniscan.xyz/address/0xc88B0aC546a99B586199dDBeE30D801Ee1d80088) |
-| Deployment execution | Successful broadcast | Inspect the [deployment transaction](https://sepolia.uniscan.xyz/tx/0x1a9052149599281a934f1df96205a5d3ed9eb10aec14b2a135a83d5b71130623) |
-| Frontend configuration | Chain `1301` | Review [`frontend/public/deployment.json`](frontend/public/deployment.json) |
+NO uses the same logic with YES as its complement. Outcome-to-collateral sales remain ordinary AMM swaps. The quoter uses executable amounts for the requested size, including the pool fee. It never routes from `YES spot + NO spot` alone.
 
-The offline suite was re-run on September 2, 2026: 40 passed, 0 failed, 0 skipped. The four fork cases require a Gnosis archive-capable RPC endpoint.
+## PoolManager execution safety
 
-## Judge walkthrough
+The complementary swap happens from `beforeSwap` while PoolManager is already unlocked. Uniswap v4 permits the nested `PoolManager.swap`; because the nested caller is the hook itself, v4 skips calling the same hook again. This avoids recursive hook execution while keeping the complementary sale atomic with the trader's swap.
 
-This path demonstrates the mechanism in about five minutes.
+The current compact on-chain quoter models the current active-liquidity range and conservatively rejects requests larger than current active liquidity. Actual execution enforces the quoted complementary proceeds as a minimum. A production version should traverse initialized ticks or use a fuller v4 simulation.
 
-### 1. Inspect the live deployment
+## Reserve and LP accounting
 
-Open the [hook on Uniscan](https://sepolia.uniscan.xyz/address/0xc88B0aC546a99B586199dDBeE30D801Ee1d80088), then confirm the deployed bytecode and successful creation transaction.
+LP shares are claims on **free collateral**, not fabricated NAV for directional tokens.
 
-### 2. Run the mechanism tests
+During a synthetic fill:
+
+```text
+free dUSD -> CTF split -> requested outcome + complement
+complement -> complementary AMM -> real dUSD
+requested outcome -> trader
+trader net payment -> PoolManager claim -> swept to real dUSD
+```
+
+The operation ends with zero hook-held directional inventory. Free collateral temporarily falls by the net synthetic cost, while `pendingCollateralClaims` records the equal payment owed by PoolManager. `sweepCollateralClaims` realizes that payment and restores reserve capital.
+
+Deposits and withdrawals are blocked while claims or outcome inventory are pending. The unmatched-inventory policy is explicit: the current strategy does not assign speculative collateral value to unmatched YES or NO, and normal synthetic fills atomically dispose of the complement. A future inventory-holding strategy would require separate NAV or in-kind withdrawal accounting.
+
+## Complete-set arbitrage and recovery
+
+Two permissionless operations use actual cross-pool execution:
+
+- `executeSplitArbitrage`: split `x` dUSD, sell `x` YES and `x` NO, and execute only if realized proceeds exceed basis plus the required margin.
+- `executeMergeArbitrage`: buy exactly `x` YES and `x` NO, unwrap and merge them, and execute only if recovered collateral exceeds actual combined cost plus the margin.
+
+Only realized collateral above basis is recorded as `lifetimeSurplus`. Token balance growth alone is never called profit.
+
+## Resolution lifecycle
+
+Once CTF reports the condition:
+
+1. `freezeForResolution` disables synthetic routing and complete-set arbitrage.
+2. Ordinary Uniswap liquidity remains separate and is not silently repriced by the hook.
+3. `redeemAfterResolution` redeems any hook-held CTF inventory and credits only collateral actually received.
+
+The winning token redeems for 1 dUSD and the losing token for zero. The hook does not apply stale pre-resolution complementary-price assumptions after freezing.
+
+## Security properties and limitations
+
+- Both pools must contain the configured collateral and deterministic wrapped outcomes for the same binary condition.
+- Duplicate or unrelated complementary-pool registration reverts.
+- Quotes use requested-size executable amounts and pool fees, not raw spot subtraction.
+- Synthetic execution requires a 30 bps advantage and enforces minimum complementary proceeds.
+- Insufficient reserve or complementary liquidity falls back to the direct AMM.
+- Nested swaps do not recursively invoke this hook.
+- Split/merge arbitrage enforces realized no-loss thresholds and credits only real collateral.
+- LP withdrawal cannot occur while settlement or inventory is pending.
+- Resolution freezes new internalization before redemption.
+
+This is oracleless only in the narrow sense that CTF defines the complete-set conversion. Complementary Uniswap execution is still manipulable like any AMM. Atomic executable quotes, size limits, slippage checks, and a safety margin reduce risk; they do not eliminate sandwiching, flash-liquidity effects, or adverse movement in thin pools. The contracts are hackathon software and have not been externally audited.
+
+Other current limitations:
+
+- Quotes do not yet traverse multiple initialized ticks.
+- The demo assumes 18-decimal collateral and wrappers.
+- Cross-pool liquidity fragmentation remains a deliberate trade-off.
+- The deployment uses demo CTF and wrapper contracts; Gnosis legacy-wrapper compatibility is tested separately on a fork.
+- A bare Anvil node does not contain canonical Permit2. Local deployment requires the repository's v4 dependency setup/preloaded Anvil state; Unichain Sepolia already provides canonical Permit2.
+
+## Tests
 
 ```bash
-git clone --recurse-submodules https://github.com/JamesVictor-O/Complete-Set-Internalization-Hook.git
-cd Complete-Set-Internalization-Hook
-forge test --offline --no-match-path "test/fork/**"
+forge test --offline --no-match-contract CompleteSetInternalizationHookForkTest -vv
 ```
 
-The most important paired cases are:
+The local suite covers legitimate 80/20 probability movement; direct-AMM and synthetic routing for YES and NO; exact-input and exact-output behavior; thin and manipulated complementary pools; insufficient reserve; settlement-gated withdrawals; repeated asymmetric flow; executable split/merge arbitrage; realized collateral accounting; two-pool registration integrity; resolution freeze; and fuzzed reserve solvency.
 
-- `test_swap_projectedToCrossParity_fillsFullyFromCompleteSet`
-- `test_swap_notProjectedToCrossParity_staysOnAmmCurve`
-- `test_swap_atParity_fillsFromCompleteSetWithZeroPoolManagerDelta`
-- `test_harvestOpportunisticSurplus_revertsOnUnprofitableSlippageFloor`
-- `test_symmetricRoundTrip_autoMergesBackToStartingReserveWithZeroSurplus`
-
-### 3. Run the frontend against Unichain Sepolia
-
-```bash
-cd frontend
-pnpm install
-pnpm dev
-```
-
-Open the printed local URL. The frontend reads the checked-in deployment, targets Unichain Sepolia by default, and requests an automatic wallet switch to chain `1301`.
-
-The quote panel compares normal AMM execution with complete-set execution before a transaction is submitted.
-
-### 4. Verify the real Gnosis interfaces
-
-Set a Gnosis RPC endpoint and run:
+Run the Gnosis compatibility fork separately:
 
 ```bash
 forge test --match-contract CompleteSetInternalizationHookForkTest -vv
 ```
 
-These tests execute against the deployed Gnosis Conditional Tokens and legacy Wrapped1155Factory bytecode. They cover split, merge, redemption, and wrapper round trips.
-
-## Live deployment on Unichain Sepolia
-
-The demo deployment uses the canonical Uniswap v4 PoolManager on chain `1301`. It includes the hook, quoter, demo collateral, demo Conditional Tokens contracts, wrapped YES/NO tokens, a registered pool, 1,000 dUSD of hook reserve, and seeded AMM liquidity.
-
-| Contract | Address |
-|---|---|
-| CompleteSetInternalizationHook | [`0xc88B...0088`](https://sepolia.uniscan.xyz/address/0xc88B0aC546a99B586199dDBeE30D801Ee1d80088) |
-| CompleteSetQuoter | [`0xd4B7...eE1B`](https://sepolia.uniscan.xyz/address/0xd4B7fCecE89ABE7cAEd26aB34b548465ae05eE1B) |
-| Demo collateral, dUSD | [`0x0115...Fa31`](https://sepolia.uniscan.xyz/address/0x0115CA8539906db2d9a4beE36C64eA94a0d7Fa31) |
-| YES wrapper | [`0xfF66...F339`](https://sepolia.uniscan.xyz/address/0xfF6687aB57eF24a4150f0A17755Ca24436B1F339) |
-| NO wrapper | [`0x7544...21f5`](https://sepolia.uniscan.xyz/address/0x75445557CF3498CE5062F2A7BDE70161cDBE21f5) |
-| Canonical v4 PoolManager | [`0x00B0...62AC`](https://sepolia.uniscan.xyz/address/0x00B036B58a818B1BC34d502D3fE730Db729e62AC) |
-
-Pool ID: `0x8b82518d80bc964538ec4866ef5d91ca13e2df7d2a9885d8adf32ac715650218`
-
-Deployment transaction: [`0x1a905214...71130623`](https://sepolia.uniscan.xyz/tx/0x1a9052149599281a934f1df96205a5d3ed9eb10aec14b2a135a83d5b71130623)
-
-The testnet deployment uses demo CTF and Wrapped1155Factory contracts. Compatibility with the legacy production Gnosis contracts is demonstrated separately by the fork suite.
-
-## Uniswap and ecosystem integrations
-
-Each integration has a specific role and a corresponding implementation surface:
-
-| Integration | Role | Evidence |
-|---|---|---|
-| Uniswap v4 | Swap lifecycle, flash accounting, return-delta execution, canonical PoolManager | [`CompleteSetInternalizationHook.sol`](src/CompleteSetInternalizationHook.sol) and the [live PoolManager](https://sepolia.uniscan.xyz/address/0x00B036B58a818B1BC34d502D3fE730Db729e62AC) |
-| Unichain Sepolia | Live hook, pool, quoter, tokens, and frontend read target | [`frontend/public/deployment.json`](frontend/public/deployment.json) and [deployment records](broadcast/00_DeployCompleteSetInternalizationHook.s.sol/1301/run-latest.json) |
-| Gnosis Conditional Tokens Framework | Complete-set split, merge, redemption, and position ID rules | [`IConditionalTokens.sol`](src/interfaces/IConditionalTokens.sol), [`CompleteSetLib.sol`](src/libraries/CompleteSetLib.sol), and the [fork suite](test/fork/CompleteSetInternalizationHookFork.t.sol) |
-| Gnosis Wrapped1155Factory | ERC-1155 outcome positions represented as ERC-20 pool currencies | [`IWrapped1155Factory.sol`](src/interfaces/IWrapped1155Factory.sol) and the live wrap/unwrap fork test |
-| Permit2 and Hookmate router | Testnet approvals and executable swap path | [`00_DeployCompleteSetInternalizationHook.s.sol`](script/00_DeployCompleteSetInternalizationHook.s.sol) |
-
-The project targets the Uniswap Foundation's Sustainable Liquidity theme directly. It does not claim a separate sponsor integration that is not present in the code.
-
-## Security properties and invariants
-
-The design limits trusted inputs and makes reserve loss explicit:
-
-- **Minimal hook permissions**: only `beforeSwap` and `beforeSwapReturnDelta` are enabled
-- **No oracle dependency**: parity comes from the complete-set invariant and pool state
-- **No upgradeable proxy**: deployed logic cannot change through an admin upgrade
-- **No off-chain keeper requirement**: swaps and merges execute through on-chain calls
-- **Reserve-limited fills**: an uncovered trade falls back to the AMM instead of creating a liability
-- **Zero PoolManager delta on internalization**: the CTF path fully accounts for the swap
-- **Merge-backed accounting**: surplus is recorded only from recovered collateral
-- **Harvest floor**: idle-inventory sales cannot execute below the enforced break-even condition
-- **Resolution freeze**: market activity stops before post-resolution redemption
-
-The core invariants are:
-
-1. Matching YES and NO inventory can merge back into collateral at 1:1
-2. Internalized swaps leave the PoolManager's AMM delta at exactly zero
-3. Reserve shares withdraw a proportional claim on collateral
-4. A symmetric round trip restores the starting reserve with zero fabricated surplus
-5. Opportunistic harvesting cannot reduce reserve capital below its tracked acquisition cost
-
-This code has not received a production security audit. Testnet deployment and passing tests do not make the hook safe for production capital.
+The images in `screenshoot/` show the superseded parity-based suite and should be replaced with a fresh corrected run.
 
 ## Reviewer evidence map
 
-This table connects the main claims to code and tests:
+| Review question | Evidence |
+| --- | --- |
+| Where is best execution selected? | `CompleteSetInternalizationHook._quoteExactInput`, `_quoteExactOutput`, and `_beforeSwap` |
+| Where is the complementary leg executed? | `CrossPoolExecutionLib.splitAndExecuteSynthetic` |
+| How are two pools tied to one condition? | `registerMarket`, `Market`, and `PoolBinding` |
+| How is reserve solvency enforced? | `freeCollateral`, `pendingCollateralClaims`, `sweepCollateralClaims`, and withdrawal guards |
+| Where are executable split/merge opportunities checked? | `executeSplitArbitrage` and `executeMergeArbitrage` |
+| Where are judge-facing scenarios tested? | `test/CrossPoolInternalization.t.sol` |
 
-| Claim | Implementation | Test evidence |
-|---|---|---|
-| Fill parity-crossing trades through CTF | [`_beforeSwap`](src/CompleteSetInternalizationHook.sol#L184) | [`CompleteSetInternalizationHook.t.sol`](test/CompleteSetInternalizationHook.t.sol) |
-| Project the trade's own price impact | [`priceIsAtOrPastParity`](src/libraries/CompleteSetLib.sol#L260) | Paired crossing and non-crossing swap tests |
-| Keep the AMM delta at zero | Return value from [`_beforeSwap`](src/CompleteSetInternalizationHook.sol#L184) | Exact-input and exact-output delta assertions |
-| Bind one pool to one CTF market | [`registerMarket`](src/CompleteSetInternalizationHook.sol#L117) | Registration and duplicate-registration tests |
-| Maintain share-based reserve accounting | [`depositCollateral`](src/CompleteSetInternalizationHook.sol#L145) and [`withdrawCollateral`](src/CompleteSetInternalizationHook.sol#L161) | Unit and fuzz tests for deposits and withdrawals |
-| Merge complete sets without fabricated surplus | [`mergeIfPossible`](src/libraries/CompleteSetLib.sol#L287) | Symmetric round-trip unit and fuzz tests |
-| Harvest only above a no-loss floor | [`harvestOpportunisticSurplus`](src/CompleteSetInternalizationHook.sol#L249) | Positive-surplus and unprofitable-floor tests |
-| Redeem after market resolution | `freezeForResolution` and `redeemAfterResolution` | Resolution lifecycle tests |
-| Match production Gnosis ID math | `getConditionId`, `getPositionId`, and `getCollectionId` in [`CompleteSetLib.sol`](src/libraries/CompleteSetLib.sol) | Pure math tests and live Gnosis fork execution |
-| Match the legacy Wrapped1155Factory ABI | [`IWrapped1155Factory.sol`](src/interfaces/IWrapped1155Factory.sol) | Live Gnosis wrap/unwrap round trip |
+## Judge walkthrough
 
-## Current scope and honest limitations
+1. Start at the invariant and verify there is no YES=NO assumption.
+2. Inspect atomic two-pool registration and deterministic wrapper validation.
+3. Compare direct and synthetic quotes in the frontend for a small and a price-impacting trade.
+4. Execute one synthetic fill, sweep its claim, and observe reserve restoration.
+5. Show a thin-complement quote falling back to AMM.
+6. Run the local suite and point to the 80/20, manipulation, exact-output, arbitrage, withdrawal, and fuzz tests.
 
-The submission implements:
+## Deployment
 
-- Binary YES/NO market registration
-- Exact-input and exact-output complete-set fills
-- Trade-impact-aware parity detection
-- Share-based collateral reserves
-- Claim sweeping and complete-set merging
-- Opportunistic surplus harvesting with a no-loss floor
-- Freeze and redemption after market resolution
-- A Unichain Sepolia deployment and frontend
-- Live Gnosis fork tests for production interface compatibility
+The corrected two-pool architecture is live on Unichain Sepolia (chain ID 1301).
 
-The submission does not implement:
+| Component | Live deployment |
+| --- | --- |
+| Hook | [`0xCeA4...c088`](https://sepolia.uniscan.xyz/address/0xCeA4463D4dE99aC8440453F3B76A9595Ecb3c088) |
+| Quoter | [`0x0a5b...9F22`](https://sepolia.uniscan.xyz/address/0x0a5b09661Ae9b09ABfd6BB4372Cf5487a1f69F22) |
+| dUSD collateral | [`0x3174...d70b`](https://sepolia.uniscan.xyz/address/0x3174b22C3729DD9Bf31AF15BCc3208221C69d70b) |
+| Wrapped YES | [`0x663D...2095`](https://sepolia.uniscan.xyz/address/0x663D1cFC580Ed43266225a3F7CA005d1B3622095) |
+| Wrapped NO | [`0x00aF...7C0d`](https://sepolia.uniscan.xyz/address/0x00aFD13D60333F2c2924aA4B9C809BDB01527C0d) |
+| Market ID | `0x997a0d2a758054a2553fad38964c180c01c16839bf90b3b1673fd78c096322ff` |
+| YES/dUSD PoolId | `0x45ee37d48d576255bd642742ceb1c54fe1ec6812ff1b6363526e07dd40fa9382` |
+| NO/dUSD PoolId | `0xc505f3ea73822e36ab7e3152774ece4511922ef7fb6bc872d6712a65d2d17102` |
 
-- Multi-outcome markets
-- A generalized prediction-market router
-- Cross-chain settlement
-- Advanced post-resolution auctions
-- Full optimization for every possible sell path
-- A production deployment using real collateral
-- A completed external audit
+On-chain verification after deployment showed both pools registered to the same condition, 20 active liquidity units in each pool, 1,000 dUSD of free hook reserve, 1,000 LP shares, zero pending claims, and zero directional inventory. All 44 broadcast transactions succeeded.
 
-The production Gnosis Wrapped1155Factory uses generic `Wrapped ERC-1155` and `WMT` metadata. The hook uses its two-argument ABI and explicit recipient payload, verified against the deployed factory in the fork suite.
+The earlier hook at `0xc88B0aC546a99B586199dDBeE30D801Ee1d80088` is **obsolete**. It is immutable and implements the superseded YES/NO architecture.
 
-## Build and test locally
-
-Install [Foundry](https://book.getfoundry.sh/getting-started/installation), then run:
+To reproduce the deployment:
 
 ```bash
-git clone --recurse-submodules https://github.com/JamesVictor-O/Complete-Set-Internalization-Hook.git
-cd Complete-Set-Internalization-Hook
-forge build
-forge test --offline --no-match-path "test/fork/**"
-```
+export UNICHAIN_SEPOLIA_RPC_URL=https://sepolia.unichain.org
+export DEPLOYER_ADDRESS=<funded-address>
 
-`foundry.toml` enables `via_ir`. The hook and `CompleteSetLib` require that compilation path to remain within the EIP-170 deployed-code limit and avoid stack-depth failures.
-
-Run only the project contracts:
-
-```bash
-forge test --offline --match-contract "CompleteSet"
-```
-
-Run the live Gnosis integration suite:
-
-```bash
-forge test --match-contract CompleteSetInternalizationHookForkTest -vv
-```
-
-## Deploy the demo
-
-The deployment script mines a CREATE2 salt for the required hook flags, deploys a binary demo market, registers the pool, funds the hook reserve, and seeds AMM liquidity.
-
-### Local Anvil
-
-```bash
-anvil
-
-forge script script/00_DeployCompleteSetInternalizationHook.s.sol \
-  --rpc-url http://127.0.0.1:8545 \
-  --private-key your_anvil_private_key_here \
-  --broadcast
-```
-
-### Unichain Sepolia
-
-Import a keystore account instead of placing a live key in shell history:
-
-```bash
-cast wallet import hookathon-deployer --interactive
-
-export UNICHAIN_SEPOLIA_RPC_URL=https://unichain-sepolia-rpc.publicnode.com
-export DEPLOYER_ADDRESS=your_wallet_address_here
-
-forge script script/00_DeployCompleteSetInternalizationHook.s.sol \
+forge script \
+  script/00_DeployCompleteSetInternalizationHook.s.sol:DeployCompleteSetInternalizationHookScript \
   --rpc-url "$UNICHAIN_SEPOLIA_RPC_URL" \
   --account hookathon-deployer \
   --sender "$DEPLOYER_ADDRESS" \
   --broadcast \
+  --slow \
+  --skip-simulation \
   -vv
 ```
 
-The script writes deployment addresses to `frontend/public/deployment.json` and funds the broadcasting wallet with demo YES/NO tokens.
+The checked-in `frontend/public/deployment.json` contains this verified deployment, including `marketId`, `yesPoolKey`, and `noPoolKey`. Regenerate ABIs after interface changes:
 
-## Repository structure
-
-```text
-src/
-  CompleteSetInternalizationHook.sol      Hook routing and LP reserve
-  CompleteSetQuoter.sol                   AMM versus complete-set quotes
-  interfaces/                             CTF, Wrapped1155Factory, and hook APIs
-  libraries/CompleteSetLib.sol            ID math, fills, merges, and harvest logic
-script/
-  00_DeployCompleteSetInternalizationHook.s.sol
-test/
-  CompleteSetInternalizationHook.t.sol    Hook lifecycle, unit, and fuzz tests
-  CompleteSetLib.t.sol                    Conditional-token ID and encoding tests
-  CompleteSetQuoter.t.sol                 Quote comparison tests
-  fork/                                   Live Gnosis integration tests
-  mocks/                                  Solidity 0.8.26 test implementations
-frontend/                                 Vite, React, Wagmi, and Viem demo
+```bash
+node scripts/sync-frontend-abis.mjs
 ```
 
-## References
+## Frontend
 
-- [Uniswap v4 documentation](https://docs.uniswap.org/contracts/v4/overview)
-- [Uniswap v4 core](https://github.com/uniswap/v4-core)
-- [Uniswap v4 periphery](https://github.com/uniswap/v4-periphery)
-- [Gnosis Conditional Tokens Framework](https://github.com/gnosis/conditional-tokens-contracts)
-- [Gnosis Wrapped1155Factory](https://github.com/gnosis/1155-to-20)
+```bash
+cd frontend
+npm install
+npm run dev
+```
 
-## License
-
-This repository is licensed under the [MIT License](LICENSE).
+Select YES/dUSD or NO/dUSD. The Swap card compares the direct AMM with the executable complete-set route, including complementary-sale proceeds. Liquidity shows reserve collateral and active Uniswap liquidity separately. Settlement converts PoolManager claims from synthetic fills into real reserve collateral.

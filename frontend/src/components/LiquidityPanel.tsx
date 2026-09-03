@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { parseUnits, type Hex } from "viem";
+import { parseUnits } from "viem";
 import type { Deployment } from "../config/deployment";
 import { useAppWallet } from "../hooks/useAppWallet";
 import { useLpShares } from "../hooks/useMarket";
@@ -9,7 +9,7 @@ import { erc20Abi } from "../abi/erc20";
 import { hookAbi } from "../config/contracts";
 import { formatToken } from "../lib/format";
 
-export function LiquidityPanel({ deployment, poolId }: { deployment: Deployment; poolId: Hex }) {
+export function LiquidityPanel({ deployment }: { deployment: Deployment }) {
   const { address, isConnected, writeContract, isWriting } = useAppWallet();
   const [depositText, setDepositText] = useState("100");
   const [withdrawText, setWithdrawText] = useState("0");
@@ -26,7 +26,7 @@ export function LiquidityPanel({ deployment, poolId }: { deployment: Deployment;
     address,
     deployment.hook,
   );
-  const { data: myShares, refetch: refetchShares } = useLpShares(deployment.hook, poolId, address);
+  const { data: myShares, refetch: refetchShares } = useLpShares(deployment.hook, deployment.marketId, address);
 
   const depositTx = usePendingTx();
   const withdrawTx = usePendingTx();
@@ -57,7 +57,7 @@ export function LiquidityPanel({ deployment, poolId }: { deployment: Deployment;
       address: deployment.hook,
       abi: hookAbi,
       functionName: "depositCollateral",
-      args: [deployment.poolKey, depositAmount],
+      args: [deployment.marketId, depositAmount],
     });
     depositTx.setHash(hash);
   }
@@ -68,7 +68,7 @@ export function LiquidityPanel({ deployment, poolId }: { deployment: Deployment;
       address: deployment.hook,
       abi: hookAbi,
       functionName: "withdrawCollateral",
-      args: [deployment.poolKey, withdrawShares],
+      args: [deployment.marketId, withdrawShares],
     });
     withdrawTx.setHash(hash);
   }
@@ -80,6 +80,7 @@ export function LiquidityPanel({ deployment, poolId }: { deployment: Deployment;
         Your shares: {formatToken(myShares as bigint | undefined)} · Balance:{" "}
         {formatToken(collateralBalance as bigint | undefined)} dUSD
       </p>
+      <p className="subtle">Deposits and withdrawals pause while this pool holds unresolved outcome inventory.</p>
 
       <div className="field-row">
         <label htmlFor="deposit-amount">Deposit dUSD</label>

@@ -10,44 +10,27 @@ import { hookAbi } from "../config/contracts";
 export function MergePanel({ deployment }: { deployment: Deployment }) {
   const { isConnected, writeContract, isWriting } = useAppWallet();
   const sweepTx = usePendingTx();
-  const mergeTx = usePendingTx();
 
   async function handleSweep() {
     const hash = await writeContract({
       address: deployment.hook,
       abi: hookAbi,
-      functionName: "sweepClaims",
-      args: [deployment.poolKey],
+      functionName: "sweepCollateralClaims",
+      args: [deployment.marketId],
     });
     sweepTx.setHash(hash);
   }
 
-  async function handleMerge() {
-    const hash = await writeContract({
-      address: deployment.hook,
-      abi: hookAbi,
-      functionName: "mergeIfPossible",
-      args: [deployment.poolKey],
-    });
-    mergeTx.setHash(hash);
-  }
-
   return (
     <section className="panel">
-      <h2>Settlement</h2>
+      <h2>Claim settlement</h2>
       <p className="subtle">
-        A CTF-filled swap only mints the hook an ERC-6909 claim mid-swap — sweep converts that into real
-        inventory once the router has settled. Merge recombines overlapping YES/NO inventory back into
-        collateral for LPs.
+        A synthetic fill receives its net dUSD payment as a PoolManager claim. Sweep converts it into real collateral and
+        restores the hook's working-capital reserve after the router settles.
       </p>
-      <div className="button-row">
-        <button type="button" className="btn btn-ghost" disabled={!isConnected || isWriting} onClick={handleSweep}>
-          {sweepTx.isConfirming ? "Sweeping…" : "Sweep claims"}
-        </button>
-        <button type="button" className="btn btn-ghost" disabled={!isConnected || isWriting} onClick={handleMerge}>
-          {mergeTx.isConfirming ? "Merging…" : "Merge inventory"}
-        </button>
-      </div>
+      <button type="button" className="btn btn-ghost" disabled={!isConnected || isWriting} onClick={handleSweep}>
+        {sweepTx.isConfirming ? "Settling…" : "Settle dUSD claim"}
+      </button>
     </section>
   );
 }

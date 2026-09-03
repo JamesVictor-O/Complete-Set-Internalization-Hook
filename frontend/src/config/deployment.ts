@@ -20,7 +20,9 @@ export interface Deployment {
   noToken: Address;
   demoTrader: Address;
   marketQuestion: string;
-  poolKey: PoolKeyJson;
+  marketId: `0x${string}`;
+  yesPoolKey: PoolKeyJson;
+  noPoolKey: PoolKeyJson;
 }
 
 /// Fetches `/deployment.json`, written by `script/00_DeployCompleteSetInternalizationHook.s.sol`.
@@ -31,5 +33,9 @@ export async function fetchDeployment(): Promise<Deployment> {
   if (!res.ok) {
     throw new Error(`Failed to load /deployment.json (${res.status}) — run the deploy script first`);
   }
-  return (await res.json()) as Deployment;
+  const deployment = (await res.json()) as Deployment;
+  if (!deployment.yesPoolKey || !deployment.noPoolKey) {
+    throw new Error("deployment.json is from the superseded YES/NO design; deploy the corrected outcome/dUSD pools");
+  }
+  return deployment;
 }

@@ -1,32 +1,33 @@
 import { useMemo, useState } from "react";
 import { parseUnits } from "viem";
 import { usePublicClient } from "wagmi";
-import type { Deployment } from "../config/deployment";
+import type { Deployment, PoolKeyJson } from "../config/deployment";
 import { useAppWallet } from "../hooks/useAppWallet";
 import { useQuote } from "../hooks/useQuote";
 import { useTokenAllowance, useTokenBalance } from "../hooks/useToken";
 import { erc20Abi } from "../abi/erc20";
 import { routerAbi } from "../config/contracts";
 import { targetChain } from "../config/chain";
-import { formatBps, formatToken, formatWadPrice } from "../lib/format";
-import type { SwapQuote } from "../config/types";
+import { formatToken } from "../lib/format";
+import type { ExecutionQuote } from "../config/types";
 
 const DEADLINE_SECONDS = 3600n;
 const SLIPPAGE_BPS = 100n; // 1%, generous for a local demo
 type SwapStage = "idle" | "approving" | "swapping" | "success";
 
-export function SwapPanel({ deployment }: { deployment: Deployment }) {
+export function SwapPanel({ deployment, poolKey, outcome }: { deployment: Deployment; poolKey: PoolKeyJson; outcome: "YES" | "NO" }) {
   const { address, isConnected, writeContract, isWriting } = useAppWallet();
   const publicClient = usePublicClient({ chainId: targetChain.id });
-  const [payYes, setPayYes] = useState(true);
+  const [buyOutcome, setBuyOutcome] = useState(true);
   const [amountText, setAmountText] = useState("10");
   const [stage, setStage] = useState<SwapStage>("idle");
   const [flowError, setFlowError] = useState<string>();
   const [flowNeedsApproval, setFlowNeedsApproval] = useState(false);
 
-  const payToken = payYes ? deployment.yesToken : deployment.noToken;
-  const receiveToken = payYes ? deployment.noToken : deployment.yesToken;
-  const zeroForOne = payToken.toLowerCase() === deployment.poolKey.currency0.toLowerCase();
+  const outcomeToken = outcome === "YES" ? deployment.yesToken : deployment.noToken;
+  const payToken = buyOutcome ? deployment.collateralToken : outcomeToken;
+  const receiveToken = buyOutcome ? outcomeToken : deployment.collateralToken;
+  const zeroForOne = payToken.toLowerCase() === poolKey.currency0.toLowerCase();
 
   const amountIn = useMemo(() => {
     try {
@@ -36,7 +37,7 @@ export function SwapPanel({ deployment }: { deployment: Deployment }) {
     }
   }, [amountText]);
 
-  const { data: quoteResult } = useQuote(deployment.quoter, deployment.poolKey, zeroForOne, amountIn);
+  const { data: quoteResult } = useQuote(deployment.quoter, poolKey, zeroForOne, amountIn);
   const { data: payBalance, refetch: refetchBalance } = useTokenBalance(payToken, address);
   const { data: receiveBalance, refetch: refetchReceiveBalance } = useTokenBalance(receiveToken, address);
   const { data: allowance, refetch: refetchAllowance } = useTokenAllowance(payToken, address, deployment.swapRouter);
@@ -50,9 +51,9 @@ export function SwapPanel({ deployment }: { deployment: Deployment }) {
     setStage("idle");
     setFlowNeedsApproval(needsApproval);
 
-    const expectedOut = quoteResult?.recommendCtf
-      ? quoteResult.ctfQuote.outAmount
-      : (quoteResult?.ammQuote.outAmount ?? 0n);
+    const expectedOut = quoteResult?.recommendSynthetic
+      ? quoteResult.syntheticQuote.amount
+      : (quoteResult?.ammQuote.amount ?? 0n);
     const amountOutMin = expectedOut > 0n ? (expectedOut * (10_000n - SLIPPAGE_BPS)) / 10_000n : 0n;
     const deadline = BigInt(Math.floor(Date.now() / 1000)) + DEADLINE_SECONDS;
 
@@ -76,7 +77,7 @@ export function SwapPanel({ deployment }: { deployment: Deployment }) {
         address: deployment.swapRouter,
         abi: routerAbi,
         functionName: "swapExactTokensForTokens",
-        args: [amountIn, amountOutMin, zeroForOne, deployment.poolKey, "0x", address, deadline],
+        args: [amountIn, amountOutMin, zeroForOne, poolKey, "0x", address, deadline],
       });
       const swapReceipt = await publicClient.waitForTransactionReceipt({ hash: swapHash });
       if (swapReceipt.status !== "success") throw new Error("Swap failed on-chain.");
@@ -96,17 +97,17 @@ export function SwapPanel({ deployment }: { deployment: Deployment }) {
         <label htmlFor="pay-token">Pay</label>
         <select
           id="pay-token"
-          value={payYes ? "yes" : "no"}
+          value={buyOutcome ? "buy" : "sell"}
           disabled={isBusy}
           onChange={(e) => {
-            setPayYes(e.target.value === "yes");
+            setBuyOutcome(e.target.value === "buy");
             setStage("idle");
             setFlowError(undefined);
             setFlowNeedsApproval(false);
           }}
         >
-          <option value="yes">YES</option>
-          <option value="no">NO</option>
+          <option value="buy">dUSD (buy {outcome})</option>
+          <option value="sell">{outcome} (sell for dUSD)</option>
         </select>
         <input
           type="number"
@@ -123,23 +124,26 @@ export function SwapPanel({ deployment }: { deployment: Deployment }) {
         />
       </div>
       <p className="subtle">
-        Balance: {formatToken(payBalance as bigint | undefined)} {payYes ? "YES" : "NO"} · receiving{" "}
-        {payYes ? "NO" : "YES"} (balance {formatToken(receiveBalance as bigint | undefined)})
+        Balance: {formatToken(payBalance as bigint | undefined)} {buyOutcome ? "dUSD" : outcome} · receiving{" "}
+        {buyOutcome ? outcome : "dUSD"} (balance {formatToken(receiveBalance as bigint | undefined)})
       </p>
 
       {quoteResult && (
         <div className="quote-box">
-          <QuoteRow label="AMM curve" quote={quoteResult.ammQuote} />
-          <QuoteRow label="CTF backstop" quote={quoteResult.ctfQuote} />
+          <QuoteRow label={`${outcome}/dUSD AMM`} quote={quoteResult.ammQuote} />
+          <QuoteRow label="Executable complete-set route" quote={quoteResult.syntheticQuote} />
           <p className="recommend">
-            Hook will route via: <strong>{quoteResult.recommendCtf ? "CTF backstop (1:1)" : "AMM curve"}</strong>
+            Best execution: <strong>{quoteResult.recommendSynthetic ? "CTF + complementary pool" : `${outcome}/dUSD AMM`}</strong>
           </p>
+          {buyOutcome && !quoteResult.syntheticQuote.available && (
+            <p className="subtle">The synthetic route is unavailable at this size. The complementary pool may be too thin, or reserve collateral may be insufficient.</p>
+          )}
         </div>
       )}
 
       {stage === "approving" && (
         <p className="subtle" role="status" aria-live="polite">
-          Step 1 of 2 · Confirm {payYes ? "YES" : "NO"} access in your wallet. The swap confirmation will
+          Step 1 of 2 · Confirm {buyOutcome ? "dUSD" : outcome} access in your wallet. The swap confirmation will
           open automatically after approval confirms.
         </p>
       )}
@@ -186,14 +190,14 @@ function readableTransactionError(error: unknown): string {
   return "The wallet could not complete the transaction.";
 }
 
-function QuoteRow({ label, quote }: { label: string; quote: SwapQuote }) {
+function QuoteRow({ label, quote }: { label: string; quote: ExecutionQuote }) {
   return (
     <div className="quote-row">
       <span>{label}</span>
       {quote.available ? (
         <span>
-          {formatToken(quote.outAmount)} out · {formatWadPrice(quote.effectivePriceWad)} ·{" "}
-          {formatBps(quote.priceImpactBps)} impact
+          {formatToken(quote.amount)} out
+          {quote.complementProceeds > 0n ? ` · complement sale ${formatToken(quote.complementProceeds)} dUSD` : ""}
         </span>
       ) : (
         <span className="subtle">unavailable</span>

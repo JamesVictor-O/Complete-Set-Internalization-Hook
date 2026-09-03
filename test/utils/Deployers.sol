@@ -97,7 +97,8 @@ abstract contract Deployers {
 
     function deployPositionManager() internal virtual {
         if (block.chainid == 31337) {
-            bytes memory args = abi.encode(address(poolManager), address(permit2), uint256(300_000), address(0), address(0));
+            bytes memory args =
+                abi.encode(address(poolManager), address(permit2), uint256(300_000), address(0), address(0));
             bytes memory initcode_ = abi.encodePacked(V4PositionManagerDeployer.initcode(), args);
             address predicted = _predictCreate2Address(initcode_);
             if (predicted.code.length > 0) {

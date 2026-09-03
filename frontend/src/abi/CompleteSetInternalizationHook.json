@@ -3,22 +3,35 @@
     "type": "constructor",
     "inputs": [
       {
-        "name": "_poolManager",
+        "name": "manager",
         "type": "address",
         "internalType": "contract IPoolManager"
       },
       {
-        "name": "_conditionalTokens",
+        "name": "ctf",
         "type": "address",
         "internalType": "contract IConditionalTokens"
       },
       {
-        "name": "_wrapped1155Factory",
+        "name": "factory",
         "type": "address",
         "internalType": "contract IWrapped1155Factory"
       }
     ],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "SAFETY_MARGIN_BPS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -825,36 +838,9 @@
     "name": "depositCollateral",
     "inputs": [
       {
-        "name": "key",
-        "type": "tuple",
-        "internalType": "struct PoolKey",
-        "components": [
-          {
-            "name": "currency0",
-            "type": "address",
-            "internalType": "Currency"
-          },
-          {
-            "name": "currency1",
-            "type": "address",
-            "internalType": "Currency"
-          },
-          {
-            "name": "fee",
-            "type": "uint24",
-            "internalType": "uint24"
-          },
-          {
-            "name": "tickSpacing",
-            "type": "int24",
-            "internalType": "int24"
-          },
-          {
-            "name": "hooks",
-            "type": "address",
-            "internalType": "contract IHooks"
-          }
-        ]
+        "name": "marketId",
+        "type": "bytes32",
+        "internalType": "bytes32"
       },
       {
         "name": "amount",
@@ -873,39 +859,75 @@
   },
   {
     "type": "function",
+    "name": "executeMergeArbitrage",
+    "inputs": [
+      {
+        "name": "marketId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "maxCost",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "minSurplus",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "surplus",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "executeSplitArbitrage",
+    "inputs": [
+      {
+        "name": "marketId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "minSurplus",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "surplus",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "freezeForResolution",
     "inputs": [
       {
-        "name": "key",
-        "type": "tuple",
-        "internalType": "struct PoolKey",
-        "components": [
-          {
-            "name": "currency0",
-            "type": "address",
-            "internalType": "Currency"
-          },
-          {
-            "name": "currency1",
-            "type": "address",
-            "internalType": "Currency"
-          },
-          {
-            "name": "fee",
-            "type": "uint24",
-            "internalType": "uint24"
-          },
-          {
-            "name": "tickSpacing",
-            "type": "int24",
-            "internalType": "int24"
-          },
-          {
-            "name": "hooks",
-            "type": "address",
-            "internalType": "contract IHooks"
-          }
-        ]
+        "name": "marketId",
+        "type": "bytes32",
+        "internalType": "bytes32"
       }
     ],
     "outputs": [],
@@ -1001,9 +1023,9 @@
     "name": "getMarket",
     "inputs": [
       {
-        "name": "poolId",
+        "name": "marketId",
         "type": "bytes32",
-        "internalType": "PoolId"
+        "internalType": "bytes32"
       }
     ],
     "outputs": [
@@ -1028,6 +1050,11 @@
             "internalType": "contract IERC20"
           },
           {
+            "name": "collateralCurrency",
+            "type": "address",
+            "internalType": "Currency"
+          },
+          {
             "name": "conditionId",
             "type": "bytes32",
             "internalType": "bytes32"
@@ -1041,6 +1068,80 @@
             "name": "noCurrency",
             "type": "address",
             "internalType": "Currency"
+          },
+          {
+            "name": "yesPoolKey",
+            "type": "tuple",
+            "internalType": "struct PoolKey",
+            "components": [
+              {
+                "name": "currency0",
+                "type": "address",
+                "internalType": "Currency"
+              },
+              {
+                "name": "currency1",
+                "type": "address",
+                "internalType": "Currency"
+              },
+              {
+                "name": "fee",
+                "type": "uint24",
+                "internalType": "uint24"
+              },
+              {
+                "name": "tickSpacing",
+                "type": "int24",
+                "internalType": "int24"
+              },
+              {
+                "name": "hooks",
+                "type": "address",
+                "internalType": "contract IHooks"
+              }
+            ]
+          },
+          {
+            "name": "noPoolKey",
+            "type": "tuple",
+            "internalType": "struct PoolKey",
+            "components": [
+              {
+                "name": "currency0",
+                "type": "address",
+                "internalType": "Currency"
+              },
+              {
+                "name": "currency1",
+                "type": "address",
+                "internalType": "Currency"
+              },
+              {
+                "name": "fee",
+                "type": "uint24",
+                "internalType": "uint24"
+              },
+              {
+                "name": "tickSpacing",
+                "type": "int24",
+                "internalType": "int24"
+              },
+              {
+                "name": "hooks",
+                "type": "address",
+                "internalType": "contract IHooks"
+              }
+            ]
+          },
+          {
+            "name": "yesPoolId",
+            "type": "bytes32",
+            "internalType": "PoolId"
+          },
+          {
+            "name": "noPoolId",
+            "type": "bytes32",
+            "internalType": "PoolId"
           },
           {
             "name": "yesPositionId",
@@ -1063,12 +1164,12 @@
             "internalType": "bytes"
           },
           {
-            "name": "collateralReserve",
+            "name": "freeCollateral",
             "type": "uint256",
             "internalType": "uint256"
           },
           {
-            "name": "outstandingSplitCost",
+            "name": "pendingCollateralClaims",
             "type": "uint256",
             "internalType": "uint256"
           },
@@ -1079,16 +1180,6 @@
           },
           {
             "name": "noInventory",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "yesClaimBalance",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "noClaimBalance",
             "type": "uint256",
             "internalType": "uint256"
           },
@@ -1109,115 +1200,205 @@
   },
   {
     "type": "function",
-    "name": "harvestOpportunisticSurplus",
+    "name": "getMarketForPool",
     "inputs": [
       {
-        "name": "key",
-        "type": "tuple",
-        "internalType": "struct PoolKey",
-        "components": [
-          {
-            "name": "currency0",
-            "type": "address",
-            "internalType": "Currency"
-          },
-          {
-            "name": "currency1",
-            "type": "address",
-            "internalType": "Currency"
-          },
-          {
-            "name": "fee",
-            "type": "uint24",
-            "internalType": "uint24"
-          },
-          {
-            "name": "tickSpacing",
-            "type": "int24",
-            "internalType": "int24"
-          },
-          {
-            "name": "hooks",
-            "type": "address",
-            "internalType": "contract IHooks"
-          }
-        ]
-      },
-      {
-        "name": "amountIn",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "minAmountOut",
-        "type": "uint256",
-        "internalType": "uint256"
+        "name": "poolId",
+        "type": "bytes32",
+        "internalType": "PoolId"
       }
     ],
     "outputs": [
       {
-        "name": "amountMerged",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "surplus",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "mergeIfPossible",
-    "inputs": [
-      {
-        "name": "key",
+        "name": "market",
         "type": "tuple",
-        "internalType": "struct PoolKey",
+        "internalType": "struct ICompleteSetInternalizationHook.Market",
         "components": [
           {
-            "name": "currency0",
+            "name": "registered",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "frozen",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "collateralToken",
+            "type": "address",
+            "internalType": "contract IERC20"
+          },
+          {
+            "name": "collateralCurrency",
             "type": "address",
             "internalType": "Currency"
           },
           {
-            "name": "currency1",
+            "name": "conditionId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "yesCurrency",
             "type": "address",
             "internalType": "Currency"
           },
           {
-            "name": "fee",
-            "type": "uint24",
-            "internalType": "uint24"
-          },
-          {
-            "name": "tickSpacing",
-            "type": "int24",
-            "internalType": "int24"
-          },
-          {
-            "name": "hooks",
+            "name": "noCurrency",
             "type": "address",
-            "internalType": "contract IHooks"
+            "internalType": "Currency"
+          },
+          {
+            "name": "yesPoolKey",
+            "type": "tuple",
+            "internalType": "struct PoolKey",
+            "components": [
+              {
+                "name": "currency0",
+                "type": "address",
+                "internalType": "Currency"
+              },
+              {
+                "name": "currency1",
+                "type": "address",
+                "internalType": "Currency"
+              },
+              {
+                "name": "fee",
+                "type": "uint24",
+                "internalType": "uint24"
+              },
+              {
+                "name": "tickSpacing",
+                "type": "int24",
+                "internalType": "int24"
+              },
+              {
+                "name": "hooks",
+                "type": "address",
+                "internalType": "contract IHooks"
+              }
+            ]
+          },
+          {
+            "name": "noPoolKey",
+            "type": "tuple",
+            "internalType": "struct PoolKey",
+            "components": [
+              {
+                "name": "currency0",
+                "type": "address",
+                "internalType": "Currency"
+              },
+              {
+                "name": "currency1",
+                "type": "address",
+                "internalType": "Currency"
+              },
+              {
+                "name": "fee",
+                "type": "uint24",
+                "internalType": "uint24"
+              },
+              {
+                "name": "tickSpacing",
+                "type": "int24",
+                "internalType": "int24"
+              },
+              {
+                "name": "hooks",
+                "type": "address",
+                "internalType": "contract IHooks"
+              }
+            ]
+          },
+          {
+            "name": "yesPoolId",
+            "type": "bytes32",
+            "internalType": "PoolId"
+          },
+          {
+            "name": "noPoolId",
+            "type": "bytes32",
+            "internalType": "PoolId"
+          },
+          {
+            "name": "yesPositionId",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "noPositionId",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "yesWrapData",
+            "type": "bytes",
+            "internalType": "bytes"
+          },
+          {
+            "name": "noWrapData",
+            "type": "bytes",
+            "internalType": "bytes"
+          },
+          {
+            "name": "freeCollateral",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "pendingCollateralClaims",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "yesInventory",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "noInventory",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "totalShares",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "lifetimeSurplus",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      },
+      {
+        "name": "binding",
+        "type": "tuple",
+        "internalType": "struct ICompleteSetInternalizationHook.PoolBinding",
+        "components": [
+          {
+            "name": "registered",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "isYes",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "marketId",
+            "type": "bytes32",
+            "internalType": "bytes32"
           }
         ]
       }
     ],
-    "outputs": [
-      {
-        "name": "amountMerged",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "surplus",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "nonpayable"
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -1299,6 +1480,42 @@
   },
   {
     "type": "function",
+    "name": "poolBinding",
+    "inputs": [
+      {
+        "name": "poolId",
+        "type": "bytes32",
+        "internalType": "PoolId"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct ICompleteSetInternalizationHook.PoolBinding",
+        "components": [
+          {
+            "name": "registered",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "isYes",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "marketId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "poolManager",
     "inputs": [],
     "outputs": [
@@ -1315,7 +1532,26 @@
     "name": "redeemAfterResolution",
     "inputs": [
       {
-        "name": "key",
+        "name": "marketId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "collateralReceived",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "registerMarket",
+    "inputs": [
+      {
+        "name": "yesPoolKey",
         "type": "tuple",
         "internalType": "struct PoolKey",
         "components": [
@@ -1345,23 +1581,9 @@
             "internalType": "contract IHooks"
           }
         ]
-      }
-    ],
-    "outputs": [
+      },
       {
-        "name": "collateralReceived",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "registerMarket",
-    "inputs": [
-      {
-        "name": "key",
+        "name": "noPoolKey",
         "type": "tuple",
         "internalType": "struct PoolKey",
         "components": [
@@ -1403,27 +1625,33 @@
         "internalType": "bytes32"
       },
       {
-        "name": "yesName",
+        "name": "",
         "type": "string",
         "internalType": "string"
       },
       {
-        "name": "yesSymbol",
+        "name": "",
         "type": "string",
         "internalType": "string"
       },
       {
-        "name": "noName",
+        "name": "",
         "type": "string",
         "internalType": "string"
       },
       {
-        "name": "noSymbol",
+        "name": "",
         "type": "string",
         "internalType": "string"
       }
     ],
-    "outputs": [],
+    "outputs": [
+      {
+        "name": "id",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
     "stateMutability": "nonpayable"
   },
   {
@@ -1433,7 +1661,7 @@
       {
         "name": "",
         "type": "bytes32",
-        "internalType": "PoolId"
+        "internalType": "bytes32"
       },
       {
         "name": "",
@@ -1471,49 +1699,17 @@
   },
   {
     "type": "function",
-    "name": "sweepClaims",
+    "name": "sweepCollateralClaims",
     "inputs": [
       {
-        "name": "key",
-        "type": "tuple",
-        "internalType": "struct PoolKey",
-        "components": [
-          {
-            "name": "currency0",
-            "type": "address",
-            "internalType": "Currency"
-          },
-          {
-            "name": "currency1",
-            "type": "address",
-            "internalType": "Currency"
-          },
-          {
-            "name": "fee",
-            "type": "uint24",
-            "internalType": "uint24"
-          },
-          {
-            "name": "tickSpacing",
-            "type": "int24",
-            "internalType": "int24"
-          },
-          {
-            "name": "hooks",
-            "type": "address",
-            "internalType": "contract IHooks"
-          }
-        ]
+        "name": "marketId",
+        "type": "bytes32",
+        "internalType": "bytes32"
       }
     ],
     "outputs": [
       {
-        "name": "yesSwept",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "noSwept",
+        "name": "amountSwept",
         "type": "uint256",
         "internalType": "uint256"
       }
@@ -1544,36 +1740,9 @@
     "name": "withdrawCollateral",
     "inputs": [
       {
-        "name": "key",
-        "type": "tuple",
-        "internalType": "struct PoolKey",
-        "components": [
-          {
-            "name": "currency0",
-            "type": "address",
-            "internalType": "Currency"
-          },
-          {
-            "name": "currency1",
-            "type": "address",
-            "internalType": "Currency"
-          },
-          {
-            "name": "fee",
-            "type": "uint24",
-            "internalType": "uint24"
-          },
-          {
-            "name": "tickSpacing",
-            "type": "int24",
-            "internalType": "int24"
-          },
-          {
-            "name": "hooks",
-            "type": "address",
-            "internalType": "contract IHooks"
-          }
-        ]
+        "name": "marketId",
+        "type": "bytes32",
+        "internalType": "bytes32"
       },
       {
         "name": "shares",
@@ -1605,22 +1774,16 @@
   },
   {
     "type": "event",
-    "name": "ClaimsSwept",
+    "name": "CollateralClaimsSwept",
     "inputs": [
       {
-        "name": "poolId",
+        "name": "marketId",
         "type": "bytes32",
         "indexed": true,
-        "internalType": "PoolId"
+        "internalType": "bytes32"
       },
       {
-        "name": "yesSwept",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
-      },
-      {
-        "name": "noSwept",
+        "name": "amount",
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
@@ -1633,10 +1796,10 @@
     "name": "CollateralDeposited",
     "inputs": [
       {
-        "name": "poolId",
+        "name": "marketId",
         "type": "bytes32",
         "indexed": true,
-        "internalType": "PoolId"
+        "internalType": "bytes32"
       },
       {
         "name": "provider",
@@ -1664,10 +1827,10 @@
     "name": "CollateralWithdrawn",
     "inputs": [
       {
-        "name": "poolId",
+        "name": "marketId",
         "type": "bytes32",
         "indexed": true,
-        "internalType": "PoolId"
+        "internalType": "bytes32"
       },
       {
         "name": "provider",
@@ -1692,69 +1855,13 @@
   },
   {
     "type": "event",
-    "name": "CompleteSetFilled",
+    "name": "MarketFrozen",
     "inputs": [
       {
-        "name": "poolId",
+        "name": "marketId",
         "type": "bytes32",
         "indexed": true,
-        "internalType": "PoolId"
-      },
-      {
-        "name": "trader",
-        "type": "address",
-        "indexed": true,
-        "internalType": "address"
-      },
-      {
-        "name": "zeroForOne",
-        "type": "bool",
-        "indexed": false,
-        "internalType": "bool"
-      },
-      {
-        "name": "amount",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
-      }
-    ],
-    "anonymous": false
-  },
-  {
-    "type": "event",
-    "name": "InventoryMerged",
-    "inputs": [
-      {
-        "name": "poolId",
-        "type": "bytes32",
-        "indexed": true,
-        "internalType": "PoolId"
-      },
-      {
-        "name": "amountMerged",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
-      },
-      {
-        "name": "surplus",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
-      }
-    ],
-    "anonymous": false
-  },
-  {
-    "type": "event",
-    "name": "MarketFrozenForResolution",
-    "inputs": [
-      {
-        "name": "poolId",
-        "type": "bytes32",
-        "indexed": true,
-        "internalType": "PoolId"
+        "internalType": "bytes32"
       }
     ],
     "anonymous": false
@@ -1764,10 +1871,10 @@
     "name": "MarketRedeemed",
     "inputs": [
       {
-        "name": "poolId",
+        "name": "marketId",
         "type": "bytes32",
         "indexed": true,
-        "internalType": "PoolId"
+        "internalType": "bytes32"
       },
       {
         "name": "collateralReceived",
@@ -1783,10 +1890,10 @@
     "name": "MarketRegistered",
     "inputs": [
       {
-        "name": "poolId",
+        "name": "marketId",
         "type": "bytes32",
         "indexed": true,
-        "internalType": "PoolId"
+        "internalType": "bytes32"
       },
       {
         "name": "conditionId",
@@ -1795,9 +1902,21 @@
         "internalType": "bytes32"
       },
       {
+        "name": "yesPoolId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "PoolId"
+      },
+      {
+        "name": "noPoolId",
+        "type": "bytes32",
+        "indexed": false,
+        "internalType": "PoolId"
+      },
+      {
         "name": "collateralToken",
         "type": "address",
-        "indexed": true,
+        "indexed": false,
         "internalType": "address"
       },
       {
@@ -1817,28 +1936,108 @@
   },
   {
     "type": "event",
-    "name": "OpportunisticSwap",
+    "name": "MergeArbitrage",
     "inputs": [
       {
-        "name": "poolId",
+        "name": "marketId",
         "type": "bytes32",
         "indexed": true,
-        "internalType": "PoolId"
+        "internalType": "bytes32"
       },
       {
-        "name": "soldYes",
-        "type": "bool",
-        "indexed": false,
-        "internalType": "bool"
-      },
-      {
-        "name": "amountIn",
+        "name": "amount",
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
       },
       {
-        "name": "amountOut",
+        "name": "cost",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "surplus",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "SplitArbitrage",
+    "inputs": [
+      {
+        "name": "marketId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "proceeds",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "surplus",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "SyntheticFill",
+    "inputs": [
+      {
+        "name": "marketId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "targetPoolId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "PoolId"
+      },
+      {
+        "name": "trader",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "exactInput",
+        "type": "bool",
+        "indexed": false,
+        "internalType": "bool"
+      },
+      {
+        "name": "outcomeAmount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "complementProceeds",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "netCollateralCost",
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
@@ -1886,28 +2085,28 @@
   },
   {
     "type": "error",
-    "name": "CurrencyMismatch",
-    "inputs": [
-      {
-        "name": "expected",
-        "type": "address",
-        "internalType": "Currency"
-      },
-      {
-        "name": "actual",
-        "type": "address",
-        "internalType": "Currency"
-      }
-    ]
-  },
-  {
-    "type": "error",
     "name": "HookNotImplemented",
     "inputs": []
   },
   {
     "type": "error",
-    "name": "InsufficientIdleInventory",
+    "name": "InsufficientEdge",
+    "inputs": [
+      {
+        "name": "realized",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "required",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "InsufficientFreeCollateral",
     "inputs": [
       {
         "name": "requested",
@@ -1939,6 +2138,17 @@
   },
   {
     "type": "error",
+    "name": "InvalidOutcomePool",
+    "inputs": [
+      {
+        "name": "poolId",
+        "type": "bytes32",
+        "internalType": "PoolId"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "InvalidPool",
     "inputs": []
   },
@@ -1947,20 +2157,20 @@
     "name": "MarketAlreadyRegistered",
     "inputs": [
       {
-        "name": "poolId",
+        "name": "marketId",
         "type": "bytes32",
-        "internalType": "PoolId"
+        "internalType": "bytes32"
       }
     ]
   },
   {
     "type": "error",
-    "name": "MarketFrozen",
+    "name": "MarketFrozenError",
     "inputs": [
       {
-        "name": "poolId",
+        "name": "marketId",
         "type": "bytes32",
-        "internalType": "PoolId"
+        "internalType": "bytes32"
       }
     ]
   },
@@ -1969,9 +2179,9 @@
     "name": "MarketNotRegistered",
     "inputs": [
       {
-        "name": "poolId",
+        "name": "marketId",
         "type": "bytes32",
-        "internalType": "PoolId"
+        "internalType": "bytes32"
       }
     ]
   },
@@ -1984,6 +2194,22 @@
     "type": "error",
     "name": "NotSelf",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "PendingSettlement",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "PoolAlreadyBound",
+    "inputs": [
+      {
+        "name": "poolId",
+        "type": "bytes32",
+        "internalType": "PoolId"
+      }
+    ]
   },
   {
     "type": "error",
@@ -2001,12 +2227,12 @@
     "name": "SlippageExceeded",
     "inputs": [
       {
-        "name": "amountOut",
+        "name": "actual",
         "type": "uint256",
         "internalType": "uint256"
       },
       {
-        "name": "required",
+        "name": "limit",
         "type": "uint256",
         "internalType": "uint256"
       }

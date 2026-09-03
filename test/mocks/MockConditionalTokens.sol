@@ -100,8 +100,9 @@ contract MockConditionalTokens is ERC1155, IConditionalTokens {
         uint256 totalPayout;
         for (uint256 i = 0; i < indexSets.length; i++) {
             uint256 indexSet = indexSets[i];
-            uint256 positionId =
-                collateralToken.getPositionId(CompleteSetLib.getCollectionId(parentCollectionId, conditionId, indexSet));
+            uint256 positionId = collateralToken.getPositionId(
+                CompleteSetLib.getCollectionId(parentCollectionId, conditionId, indexSet)
+            );
 
             uint256 payoutNumerator;
             for (uint256 j = 0; j < outcomeSlotCount; j++) {

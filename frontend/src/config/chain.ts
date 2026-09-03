@@ -31,3 +31,8 @@ if (configuredChainId !== anvilLocal.id && configuredChainId !== unichainSepolia
 }
 
 export const targetChain = configuredChainId === unichainSepolia.id ? unichainSepolia : anvilLocal;
+
+// Canonical Uniswap v4 StateView deployment on Unichain Sepolia. Local Anvil
+// deployments do not necessarily include StateView, so the read is disabled there.
+export const stateViewAddress =
+  targetChain.id === unichainSepolia.id ? "0xc199f1072a74d4e905aba1a84d9a45e2546b6222" : undefined;

@@ -3,12 +3,12 @@
     "type": "constructor",
     "inputs": [
       {
-        "name": "_poolManager",
+        "name": "manager",
         "type": "address",
         "internalType": "contract IPoolManager"
       },
       {
-        "name": "_hook",
+        "name": "hook_",
         "type": "address",
         "internalType": "contract ICompleteSetInternalizationHook"
       }
@@ -46,7 +46,7 @@
     "name": "quote",
     "inputs": [
       {
-        "name": "key",
+        "name": "targetKey",
         "type": "tuple",
         "internalType": "struct PoolKey",
         "components": [
@@ -97,20 +97,20 @@
           {
             "name": "ammQuote",
             "type": "tuple",
-            "internalType": "struct CompleteSetQuoter.SwapQuote",
+            "internalType": "struct CompleteSetQuoter.ExecutionQuote",
             "components": [
               {
-                "name": "outAmount",
+                "name": "amount",
                 "type": "uint256",
                 "internalType": "uint256"
               },
               {
-                "name": "effectivePriceWad",
+                "name": "complementProceeds",
                 "type": "uint256",
                 "internalType": "uint256"
               },
               {
-                "name": "priceImpactBps",
+                "name": "reserveRequired",
                 "type": "uint256",
                 "internalType": "uint256"
               },
@@ -122,22 +122,22 @@
             ]
           },
           {
-            "name": "ctfQuote",
+            "name": "syntheticQuote",
             "type": "tuple",
-            "internalType": "struct CompleteSetQuoter.SwapQuote",
+            "internalType": "struct CompleteSetQuoter.ExecutionQuote",
             "components": [
               {
-                "name": "outAmount",
+                "name": "amount",
                 "type": "uint256",
                 "internalType": "uint256"
               },
               {
-                "name": "effectivePriceWad",
+                "name": "complementProceeds",
                 "type": "uint256",
                 "internalType": "uint256"
               },
               {
-                "name": "priceImpactBps",
+                "name": "reserveRequired",
                 "type": "uint256",
                 "internalType": "uint256"
               },
@@ -149,7 +149,124 @@
             ]
           },
           {
-            "name": "recommendCtf",
+            "name": "recommendSynthetic",
+            "type": "bool",
+            "internalType": "bool"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "quoteExactOutput",
+    "inputs": [
+      {
+        "name": "targetKey",
+        "type": "tuple",
+        "internalType": "struct PoolKey",
+        "components": [
+          {
+            "name": "currency0",
+            "type": "address",
+            "internalType": "Currency"
+          },
+          {
+            "name": "currency1",
+            "type": "address",
+            "internalType": "Currency"
+          },
+          {
+            "name": "fee",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "tickSpacing",
+            "type": "int24",
+            "internalType": "int24"
+          },
+          {
+            "name": "hooks",
+            "type": "address",
+            "internalType": "contract IHooks"
+          }
+        ]
+      },
+      {
+        "name": "zeroForOne",
+        "type": "bool",
+        "internalType": "bool"
+      },
+      {
+        "name": "amountOut",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "result",
+        "type": "tuple",
+        "internalType": "struct CompleteSetQuoter.QuoteResult",
+        "components": [
+          {
+            "name": "ammQuote",
+            "type": "tuple",
+            "internalType": "struct CompleteSetQuoter.ExecutionQuote",
+            "components": [
+              {
+                "name": "amount",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "complementProceeds",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "reserveRequired",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "available",
+                "type": "bool",
+                "internalType": "bool"
+              }
+            ]
+          },
+          {
+            "name": "syntheticQuote",
+            "type": "tuple",
+            "internalType": "struct CompleteSetQuoter.ExecutionQuote",
+            "components": [
+              {
+                "name": "amount",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "complementProceeds",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "reserveRequired",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "available",
+                "type": "bool",
+                "internalType": "bool"
+              }
+            ]
+          },
+          {
+            "name": "recommendSynthetic",
             "type": "bool",
             "internalType": "bool"
           }

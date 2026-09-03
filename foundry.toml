@@ -11,6 +11,8 @@ out = "out"
 solc_version = "0.8.26"
 src = "src"
 via_ir = true
+optimizer = true
+optimizer_runs = 200
 
 [rpc_endpoints]
 unichain_sepolia = "${UNICHAIN_SEPOLIA_RPC_URL}"

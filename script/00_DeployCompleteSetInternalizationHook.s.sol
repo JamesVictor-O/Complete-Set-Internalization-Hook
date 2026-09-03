@@ -8,6 +8,7 @@ import {HookMiner} from "@uniswap/v4-periphery/src/utils/HookMiner.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {Constants} from "@uniswap/v4-core/test/utils/Constants.sol";
@@ -25,9 +26,9 @@ import {MockConditionalTokens} from "../test/mocks/MockConditionalTokens.sol";
 import {MockWrapped1155Factory} from "../test/mocks/MockWrapped1155Factory.sol";
 
 /// @notice Deploys {CompleteSetInternalizationHook} and {CompleteSetQuoter} end to end for the demo
-/// frontend on local Anvil or Unichain Sepolia: mines the hook's CREATE2 address, deploys it against a fresh demo CTF condition,
-/// registers a YES/NO market initialized *off* 1:1 parity with real core AMM liquidity (so the AMM
-/// path and the CTF path genuinely differ - a pool started exactly at parity with no liquidity, like
+/// frontend on Unichain Sepolia or an Anvil node preloaded with canonical v4 dependencies: mines the hook's CREATE2 address, deploys it against a fresh demo CTF condition,
+/// registers a binary market with separate YES/dUSD and NO/dUSD pools and real core AMM liquidity (so the AMM
+/// path and the executable complete-set path genuinely differ - a pool started with no liquidity, like
 /// the test suite's default fixture, has nothing to contrast), seeds the hook's LP collateral reserve,
 /// pre-funds the selected trader with both wrapped legs, and writes every address the
 /// frontend needs to `frontend/public/deployment.json`.
@@ -36,6 +37,7 @@ import {MockWrapped1155Factory} from "../test/mocks/MockWrapped1155Factory.sol";
 /// directly). On Unichain Sepolia these demo contracts are deliberately deployed alongside the hook;
 /// compatibility with Gnosis's production contracts is covered separately by the live fork tests.
 contract DeployCompleteSetInternalizationHookScript is BaseScript, LiquidityHelpers {
+    using PoolIdLibrary for PoolKey;
     /////////////////////////////////////
     // --- Configure These ---
     /////////////////////////////////////
@@ -53,6 +55,7 @@ contract DeployCompleteSetInternalizationHookScript is BaseScript, LiquidityHelp
     address constant DEMO_TRADER = 0x70997970C51812dc3A010C7d01b50e0d17dc79C8;
     uint256 constant ANVIL_CHAIN_ID = 31337;
     uint256 constant UNICHAIN_SEPOLIA_CHAIN_ID = 1301;
+
     /////////////////////////////////////
 
     /// @dev Bundles every piece of state the deploy steps below need to share, purely to stay under
@@ -65,12 +68,13 @@ contract DeployCompleteSetInternalizationHookScript is BaseScript, LiquidityHelp
         MockWrapped1155Factory wrapped1155Factory;
         MockERC20 collateral;
         bytes32 conditionId;
+        bytes32 marketId;
         uint256 yesPositionId;
         uint256 noPositionId;
         address yesToken;
         address noToken;
-        PoolKey poolKey;
-        bool yesIsCurrency0;
+        PoolKey yesPoolKey;
+        PoolKey noPoolKey;
     }
 
     function run() external {
@@ -80,8 +84,9 @@ contract DeployCompleteSetInternalizationHookScript is BaseScript, LiquidityHelp
         );
         vm.startBroadcast();
         DemoMarket memory dm = _deployHookAndMarket();
-        _seedReserve(dm);
-        _seedCoreLiquidity(dm);
+        _seedReserves(dm);
+        _seedCoreLiquidity(dm, true);
+        _seedCoreLiquidity(dm, false);
         _fundTrader(dm);
         vm.stopBroadcast();
 
@@ -98,9 +103,8 @@ contract DeployCompleteSetInternalizationHookScript is BaseScript, LiquidityHelp
         // Mine + deploy the hook at an address encoding the correct permission flags.
         uint160 flags = uint160(Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG);
         bytes memory constructorArgs = abi.encode(poolManager, dm.conditionalTokens, dm.wrapped1155Factory);
-        (address hookAddress, bytes32 salt) = HookMiner.find(
-            CREATE2_FACTORY, flags, type(CompleteSetInternalizationHook).creationCode, constructorArgs
-        );
+        (address hookAddress, bytes32 salt) =
+            HookMiner.find(CREATE2_FACTORY, flags, type(CompleteSetInternalizationHook).creationCode, constructorArgs);
         dm.hook =
             new CompleteSetInternalizationHook{salt: salt}(poolManager, dm.conditionalTokens, dm.wrapped1155Factory);
         require(address(dm.hook) == hookAddress, "DeployCompleteSetInternalizationHookScript: Hook Address Mismatch");
@@ -116,44 +120,54 @@ contract DeployCompleteSetInternalizationHookScript is BaseScript, LiquidityHelp
         dm.yesToken = dm.wrapped1155Factory.requireWrapped1155(dm.conditionalTokens, dm.yesPositionId);
         dm.noToken = dm.wrapped1155Factory.requireWrapped1155(dm.conditionalTokens, dm.noPositionId);
 
-        dm.yesIsCurrency0 = dm.yesToken < dm.noToken;
-        (Currency c0, Currency c1) = dm.yesIsCurrency0
-            ? (Currency.wrap(dm.yesToken), Currency.wrap(dm.noToken))
-            : (Currency.wrap(dm.noToken), Currency.wrap(dm.yesToken));
-        dm.poolKey =
-            PoolKey({currency0: c0, currency1: c1, fee: LP_FEE, tickSpacing: TICK_SPACING, hooks: IHooks(dm.hook)});
+        dm.yesPoolKey = _outcomePoolKey(dm, dm.yesToken);
+        dm.noPoolKey = _outcomePoolKey(dm, dm.noToken);
+        dm.marketId = dm.hook
+            .registerMarket(dm.yesPoolKey, dm.noPoolKey, collateralAsIERC20, dm.conditionId, "YES", "YES", "NO", "NO");
 
-        dm.hook.registerMarket(dm.poolKey, collateralAsIERC20, dm.conditionId, "YES", "YES", "NO", "NO");
-
-        // Initialize off parity so the AMM and CTF paths genuinely differ (see contract NatSpec).
-        // Priced so that *paying NO* - the leg "Buy YES" swaps away - lands on the unfavorable side of
-        // the curve, regardless of how the wrapped tokens happened to sort into currency0/currency1:
-        //   - if YES is currency0 (so NO is currency1), paying NO means paying currency1, which is
-        //     unfavorable when currency0 is priced *richer* (price > 1) -> start above parity.
-        //   - if NO is currency0, paying NO means paying currency0, unfavorable when it's priced
-        //     *cheaper* (price < 1) -> start below parity.
-        uint160 startSqrtPrice = dm.yesIsCurrency0 ? Constants.SQRT_PRICE_101_100 : Constants.SQRT_PRICE_99_100;
-        poolManager.initialize(dm.poolKey, startSqrtPrice);
+        // Approximate demo probabilities: YES 60c and NO 40c. Pool price is currency1/currency0.
+        poolManager.initialize(dm.yesPoolKey, _outcomeStartPrice(dm, dm.yesPoolKey, 6000));
+        poolManager.initialize(dm.noPoolKey, _outcomeStartPrice(dm, dm.noPoolKey, 4000));
     }
 
-    function _seedReserve(DemoMarket memory dm) private {
+    function _outcomePoolKey(DemoMarket memory dm, address outcome) private pure returns (PoolKey memory) {
+        (Currency c0, Currency c1) = address(dm.collateral) < outcome
+            ? (Currency.wrap(address(dm.collateral)), Currency.wrap(outcome))
+            : (Currency.wrap(outcome), Currency.wrap(address(dm.collateral)));
+        return PoolKey({currency0: c0, currency1: c1, fee: LP_FEE, tickSpacing: TICK_SPACING, hooks: IHooks(dm.hook)});
+    }
+
+    function _outcomeStartPrice(DemoMarket memory dm, PoolKey memory key, int24 outcomePriceBps)
+        private
+        pure
+        returns (uint160)
+    {
+        // tick ~= ln(price)/ln(1.0001). If collateral is currency0 the pool ratio is outcome/collateral
+        // (the reciprocal of its dUSD price); otherwise it is collateral/outcome.
+        int24 tick = outcomePriceBps == 6000 ? int24(5108) : int24(9163);
+        bool collateralIsCurrency0 = Currency.unwrap(key.currency0) == address(dm.collateral);
+        return TickMath.getSqrtPriceAtTick(collateralIsCurrency0 ? tick : -tick);
+    }
+
+    function _seedReserves(DemoMarket memory dm) private {
         dm.collateral.mint(deployerAddress, LP_RESERVE);
-        dm.collateral.approve(address(dm.hook), LP_RESERVE);
-        dm.hook.depositCollateral(dm.poolKey, LP_RESERVE);
+        dm.collateral.approve(address(dm.hook), type(uint256).max);
+        dm.hook.depositCollateral(dm.marketId, LP_RESERVE);
     }
 
     /// @dev Seeds real, thin core AMM liquidity (full-range) — separate from the hook's own collateral
     /// reserve — so the pool actually has a curve for {CompleteSetQuoter} to quote against and for the
-    /// hook's trade-impact-aware parity check to have something real to compare against.
-    function _seedCoreLiquidity(DemoMarket memory dm) private {
+    /// hook's executable best-route comparison to have something real to compare against.
+    function _seedCoreLiquidity(DemoMarket memory dm, bool seedYes) private {
         uint256 wrapAmount = CORE_LIQUIDITY * 20;
-        _mintWrapped(dm, true, deployerAddress, wrapAmount);
-        _mintWrapped(dm, false, deployerAddress, wrapAmount);
+        _mintWrapped(dm, seedYes, deployerAddress, wrapAmount);
+        dm.collateral.mint(deployerAddress, wrapAmount);
 
-        IERC20(dm.yesToken).approve(address(permit2), type(uint256).max);
-        IERC20(dm.noToken).approve(address(permit2), type(uint256).max);
-        permit2.approve(dm.yesToken, address(positionManager), type(uint160).max, type(uint48).max);
-        permit2.approve(dm.noToken, address(positionManager), type(uint160).max, type(uint48).max);
+        address outcome = seedYes ? dm.yesToken : dm.noToken;
+        IERC20(outcome).approve(address(permit2), type(uint256).max);
+        dm.collateral.approve(address(permit2), type(uint256).max);
+        permit2.approve(outcome, address(positionManager), type(uint160).max, type(uint48).max);
+        permit2.approve(address(dm.collateral), address(positionManager), type(uint160).max, type(uint48).max);
 
         // Uses the same script-safe pattern as script/01_CreatePoolAndAddLiquidity.s.sol
         // (`LiquidityHelpers._mintLiquidityParams` + `positionManager.modifyLiquidities` directly) -
@@ -161,9 +175,9 @@ contract DeployCompleteSetInternalizationHookScript is BaseScript, LiquidityHelp
         // refuses to broadcast (a script contract's own address is ephemeral and not meant to be relied
         // on), so it's test-only and not usable here.
         (bytes memory actions, bytes[] memory params) = _mintLiquidityParams(
-            dm.poolKey,
-            TickMath.minUsableTick(dm.poolKey.tickSpacing),
-            TickMath.maxUsableTick(dm.poolKey.tickSpacing),
+            seedYes ? dm.yesPoolKey : dm.noPoolKey,
+            TickMath.minUsableTick(TICK_SPACING),
+            TickMath.maxUsableTick(TICK_SPACING),
             CORE_LIQUIDITY,
             type(uint256).max,
             type(uint256).max,
@@ -179,12 +193,14 @@ contract DeployCompleteSetInternalizationHookScript is BaseScript, LiquidityHelp
     function _mintWrapped(DemoMarket memory dm, bool wantYes, address to, uint256 amount) private {
         dm.collateral.mint(deployerAddress, amount);
         dm.collateral.approve(address(dm.conditionalTokens), amount);
-        dm.conditionalTokens.splitPosition(
-            IERC20(address(dm.collateral)), bytes32(0), dm.conditionId, CompleteSetLib.binaryPartition(), amount
-        );
+        dm.conditionalTokens
+            .splitPosition(
+                IERC20(address(dm.collateral)), bytes32(0), dm.conditionId, CompleteSetLib.binaryPartition(), amount
+            );
         uint256 positionId = wantYes ? dm.yesPositionId : dm.noPositionId;
         bytes memory wrapData = CompleteSetLib.encodeWrappedTokenData(deployerAddress);
-        dm.conditionalTokens.safeTransferFrom(deployerAddress, address(dm.wrapped1155Factory), positionId, amount, wrapData);
+        dm.conditionalTokens
+            .safeTransferFrom(deployerAddress, address(dm.wrapped1155Factory), positionId, amount, wrapData);
         if (to != deployerAddress) {
             address token = wantYes ? dm.yesToken : dm.noToken;
             IERC20(token).transfer(to, amount);
@@ -193,6 +209,7 @@ contract DeployCompleteSetInternalizationHookScript is BaseScript, LiquidityHelp
 
     function _fundTrader(DemoMarket memory dm) private {
         address trader = _traderAddress();
+        dm.collateral.mint(trader, DEMO_TRADER_FUNDING * 2);
         _mintWrapped(dm, true, trader, DEMO_TRADER_FUNDING);
         _mintWrapped(dm, false, trader, DEMO_TRADER_FUNDING);
     }
@@ -204,39 +221,78 @@ contract DeployCompleteSetInternalizationHookScript is BaseScript, LiquidityHelp
     }
 
     function _writeDeploymentJson(DemoMarket memory dm) private {
-        string memory poolKeyJson = _poolKeyJson(dm);
+        string memory yesPoolKeyJson = _poolKeyJson(dm.yesPoolKey);
+        string memory noPoolKeyJson = _poolKeyJson(dm.noPoolKey);
 
         string memory part1 = string.concat(
             "{",
-            '"chainId":', vm.toString(block.chainid), ",",
-            '"hook":"', vm.toString(address(dm.hook)), '",',
-            '"quoter":"', vm.toString(address(dm.quoter)), '",',
-            '"poolManager":"', vm.toString(address(poolManager)), '",'
+            '"chainId":',
+            vm.toString(block.chainid),
+            ",",
+            '"hook":"',
+            vm.toString(address(dm.hook)),
+            '",',
+            '"quoter":"',
+            vm.toString(address(dm.quoter)),
+            '",',
+            '"poolManager":"',
+            vm.toString(address(poolManager)),
+            '",'
         );
         string memory part2 = string.concat(
-            '"swapRouter":"', vm.toString(address(swapRouter)), '",',
-            '"permit2":"', vm.toString(address(permit2)), '",',
-            '"collateralToken":"', vm.toString(address(dm.collateral)), '",',
-            '"yesToken":"', vm.toString(dm.yesToken), '",'
+            '"swapRouter":"',
+            vm.toString(address(swapRouter)),
+            '",',
+            '"permit2":"',
+            vm.toString(address(permit2)),
+            '",',
+            '"collateralToken":"',
+            vm.toString(address(dm.collateral)),
+            '",',
+            '"yesToken":"',
+            vm.toString(dm.yesToken),
+            '",'
         );
         string memory part3 = string.concat(
-            '"noToken":"', vm.toString(dm.noToken), '",',
-            '"demoTrader":"', vm.toString(_traderAddress()), '",',
+            '"noToken":"',
+            vm.toString(dm.noToken),
+            '",',
+            '"demoTrader":"',
+            vm.toString(_traderAddress()),
+            '",',
             '"marketQuestion":"Will ETH be above $5,000 on Sept 30?",',
-            '"poolKey":', poolKeyJson, "}"
+            '"marketId":"',
+            vm.toString(dm.marketId),
+            '",',
+            '"yesPoolKey":',
+            yesPoolKeyJson,
+            ",",
+            '"noPoolKey":',
+            noPoolKeyJson,
+            "}"
         );
 
         vm.writeJson(string.concat(part1, part2, part3), "frontend/public/deployment.json");
     }
 
-    function _poolKeyJson(DemoMarket memory dm) private pure returns (string memory) {
+    function _poolKeyJson(PoolKey memory key) private pure returns (string memory) {
         return string.concat(
             "{",
-            '"currency0":"', vm.toString(Currency.unwrap(dm.poolKey.currency0)), '",',
-            '"currency1":"', vm.toString(Currency.unwrap(dm.poolKey.currency1)), '",',
-            '"fee":', vm.toString(uint256(dm.poolKey.fee)), ",",
-            '"tickSpacing":', vm.toString(int256(dm.poolKey.tickSpacing)), ",",
-            '"hooks":"', vm.toString(address(dm.hook)), '"}'
+            '"currency0":"',
+            vm.toString(Currency.unwrap(key.currency0)),
+            '",',
+            '"currency1":"',
+            vm.toString(Currency.unwrap(key.currency1)),
+            '",',
+            '"fee":',
+            vm.toString(uint256(key.fee)),
+            ",",
+            '"tickSpacing":',
+            vm.toString(int256(key.tickSpacing)),
+            ",",
+            '"hooks":"',
+            vm.toString(address(key.hooks)),
+            '"}'
         );
     }
 
@@ -248,6 +304,10 @@ contract DeployCompleteSetInternalizationHookScript is BaseScript, LiquidityHelp
         console2.log("NO token:", dm.noToken);
         console2.log("LP reserve seeded:", LP_RESERVE);
         console2.log("Core AMM liquidity seeded:", CORE_LIQUIDITY);
+        console2.log("YES/dUSD pool ID:");
+        console2.logBytes32(PoolId.unwrap(dm.yesPoolKey.toId()));
+        console2.log("NO/dUSD pool ID:");
+        console2.logBytes32(PoolId.unwrap(dm.noPoolKey.toId()));
         console2.log("Trader funded at:", _traderAddress());
         if (wroteDeploymentJson) console2.log("Wrote frontend/public/deployment.json");
     }
